@@ -17,6 +17,7 @@ unsigned long tempoInicioGap = 0;
 
 // Variável para armazenar o tipo de giro determinado pelo sensor RGB
 int tipoGiro = 0;
+float anguloInicial = 0;
 
 
 // ==============================================================================
@@ -64,6 +65,10 @@ void setup() {
 void loop() {
   // REGRA DE OURO: Código não-bloqueante. Não utilize delay() no loop principal!
   
+  // Atualiza o giroscópio a cada ciclo para o rastreio do Yaw(Z) não perder precisão
+  tcaselect(CANAL_GY521);
+  mpu.update();
+
   switch (estadoAtual) {
     case ESTADO_CALIBRACAO:
       // Executa a calibração dos sensores e do giroscópio
@@ -165,16 +170,47 @@ void loop() {
       break;
     }
 
-    case ESTADO_VERDE:
-      // Lógica de intersecção/curva acionada por sensor(es) verde(s):
-      // - 1 Sensor: Giro de 90° (para a direção do sensor) usando odometria/giroscópio
-      // - 2 Sensores: Giro de 180° usando giroscópio
+    case ESTADO_VERDE: {
+      // 1. Define o ângulo alvo com base no tipo de giro
+      // Convenção MPU: Giro pra Esquerda (+) / Giro pra Direita (-)
+      // Como 90 é Direita e -90 é Esquerda na nossa lógica:
+      float anguloAlvo = anguloInicial - tipoGiro; 
+      
+      // 2. Obtém o ângulo atual do MPU (já atualizado no topo do loop)
+      float anguloAtual = mpu.getAngleZ();
+      float erroAngulo = anguloAlvo - anguloAtual;
+
+      // 3. Controla o giro até atingir o alvo (+/- 3 graus de tolerância)
+      if (abs(erroAngulo) > 3.0) {
+        if (erroAngulo > 0) {
+          // Virar para Esquerda (aumenta o Z)
+          controlarRodas(150, -150); 
+        } else {
+          // Virar para Direita (diminui o Z)
+          controlarRodas(-150, 150);
+        }
+      } else {
+        // Atingiu o ângulo!
+        controlarRodas(0, 0);
+        
+        // Zera as variáveis do PID para não acumular erro da perda da linha anterior
+        ultimoErro = 0;
+        contadorFalhas = 0;
+        modoLinha = SEGUINDO; // Garante que vai voltar caçando a linha
+
+        // Volta para a linha
+        estadoAtual = ESTADO_LINHA;
+        atualizarStatus("Linha", "Seguindo...");
+      }
       break;
+    }
 
     case ESTADO_VERMELHO:
-      // Lógica acionada ao detectar a cor vermelha:
-      // - Parar os motores (StopAll)
-      // - Aguardar liberação
+      // Parada Total Imediata
+      controlarRodas(0, 0);
+      
+      // Poderíamos piscar um LED aqui, mas a regra de segurança do Vermelho 
+      // do robô antigo dizia para parar e esperar resgatar o robô
       break;
 
     case ESTADO_OBSTACULO:

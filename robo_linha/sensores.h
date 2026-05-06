@@ -3,6 +3,7 @@
 
 #include <QTRSensors.h>
 #include <Adafruit_TCS34725.h>
+#include <MPU6050_light.h>
 #include "config.h"
 #include "display_utils.h"
 #include "motores.h"
@@ -18,12 +19,16 @@ uint16_t sensorValues[NUM_SENSORES_IR];
 Adafruit_TCS34725 tcsDir = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 Adafruit_TCS34725 tcsEsq = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 
+// Objeto do Giroscópio
+MPU6050 mpu(Wire);
+
 // Variável para controle não-bloqueante de leitura de cor
 unsigned long ultimaLeituraCor = 0;
 
 // Referências às variáveis globais em robo_linha.ino
 extern EstadoRobo estadoAtual;
 extern int tipoGiro;
+extern float anguloInicial;
 
 // ==============================================================================
 // FUNÇÕES DOS SENSORES
@@ -44,6 +49,20 @@ void initSensores() {
   tcaselect(CANAL_TCS_ESQ);
   if (!tcsEsq.begin()) {
     Serial.println(F("ERRO: TCS Esquerdo não encontrado!"));
+  }
+  
+  // Inicializa Giroscópio (Porta 0)
+  tcaselect(CANAL_GY521);
+  byte status = mpu.begin();
+  if(status != 0) {
+    Serial.println(F("ERRO: MPU6050 não encontrado!"));
+  } else {
+    Serial.println(F("Calculando offsets do MPU... Não mova o robô!"));
+    atualizarStatus("Giroscopio", "Calibrando");
+    // O delay aqui é aceitável pois está no setup
+    delay(1000); 
+    mpu.calcOffsets(true,true);
+    atualizarStatus("Giroscopio", "OK");
   }
 }
 
@@ -107,16 +126,19 @@ void verificarCores() {
   if (verdeDir && verdeEsq) {
     estadoAtual = ESTADO_VERDE;
     tipoGiro = 180;
+    anguloInicial = mpu.getAngleZ(); // Salva o ângulo atual
     atualizarStatus("VERDE DUPLO", "Giro 180");
     return;
   } else if (verdeDir) {
     estadoAtual = ESTADO_VERDE;
     tipoGiro = 90;
+    anguloInicial = mpu.getAngleZ(); // Salva o ângulo atual
     atualizarStatus("VERDE DIR", "Giro 90");
     return;
   } else if (verdeEsq) {
     estadoAtual = ESTADO_VERDE;
     tipoGiro = -90;
+    anguloInicial = mpu.getAngleZ(); // Salva o ângulo atual
     atualizarStatus("VERDE ESQ", "Giro -90");
     return;
   }

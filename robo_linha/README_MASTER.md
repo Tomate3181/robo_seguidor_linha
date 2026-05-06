@@ -31,3 +31,9 @@ O robô opera através de uma Máquina de Estados Finitos:
 - `Adafruit_TCS34725.h` (Cores)
 - `Adafruit_SSD1306.h` (OLED)
 - `MPU6050_light.h` ou `Adafruit_MPU6050.h` (Giroscópio)
+
+### 🟢 Lógica do Verde (Tomada de Decisão)
+1. Detectou Verde -> Salva posição atual do Giroscópio (Yaw).
+2. Entra no `ESTADO_VERDE`.
+3. Gira os motores em sentidos opostos até que o Giroscópio aponte +90°, -90° ou 180°.
+4. Ao atingir o ângulo, limpa as variáveis do PID (zera a integral) e volta para `ESTADO_LINHA`.
