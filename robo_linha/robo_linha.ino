@@ -15,6 +15,9 @@ int contadorFalhas = 0;
 unsigned long tempoInicioInsistir = 0;
 unsigned long tempoInicioGap = 0;
 
+// Variável para armazenar o tipo de giro determinado pelo sensor RGB
+int tipoGiro = 0;
+
 
 // ==============================================================================
 // FUNÇÃO DO MULTIPLEXADOR I2C (TCA9548A)
@@ -76,6 +79,14 @@ void loop() {
           vendoLinha = true;
           break;
         }
+      }
+
+      // Verifica as cores a cada 50ms para intersecções/obstáculos
+      verificarCores();
+
+      // Se verificarCores alterou o estado (achou verde/vermelho), saímos do case
+      if (estadoAtual != ESTADO_LINHA) {
+        break;
       }
 
       // Máquina de estados interna para controle da linha (Não-bloqueante)
