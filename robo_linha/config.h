@@ -21,11 +21,11 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {24, 25, 26, 27, 28, 29, 30, 31};
 #define CANAL_OLED     3
 
 // --- Motores (Shield - M1, M2, M3, M4) ---
-// Identificação padrão para a maioria das bibliotecas de Shield (como AFMotor)
-#define MOTOR_FR_ESQ 1
-#define MOTOR_FR_DIR 2
-#define MOTOR_TR_ESQ 3
-#define MOTOR_TR_DIR 4
+// Mapeamento extraído da programação antiga (seguirLinha_v2.0.ino)
+#define MOTOR_TR_DIR 1  // Antigo m_tras_dir(1)
+#define MOTOR_TR_ESQ 2  // Antigo m_tras_esq(2)
+#define MOTOR_FR_DIR 3  // Antigo m_frente_dir(3)
+#define MOTOR_FR_ESQ 4  // Antigo m_frente_esq(4)
 
 // --- Sensor Ultrassônico ---
 // Pinos sugeridos, a definir/alterar conforme o circuito físico
