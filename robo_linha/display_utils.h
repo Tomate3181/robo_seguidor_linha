@@ -23,7 +23,7 @@ extern void tcaselect(uint8_t i);
 // INICIALIZAÇÃO DO DISPLAY OLED
 // ==============================================================================
 void initDisplay() {
-  // 1. Abre a comunicação I2C no canal 3 (CANAL_OLED definido no config.h)
+  // 1. Abre a comunicação I2C no canal 0 (CANAL_OLED definido no config.h)
   tcaselect(CANAL_OLED);
   
   // 2. Inicializa o display no endereço I2C 0x3C

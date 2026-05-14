@@ -46,9 +46,15 @@ void setup() {
   Serial.println(F("   Iniciando Robo Seguidor de Linha    "));
   Serial.println(F("======================================="));
   
-  // Configuração inicial de pinos avulsos (ex: Ultrassom)
-  pinMode(PINO_TRIG, OUTPUT);
-  pinMode(PINO_ECHO, INPUT);
+  // Configuração inicial dos Sensores Ultrassônicos
+  pinMode(PINO_TRIG_FRENTE, OUTPUT);
+  pinMode(PINO_ECHO_FRENTE, INPUT);
+  
+  pinMode(PINO_TRIG_ESQ, OUTPUT);
+  pinMode(PINO_ECHO_ESQ, INPUT);
+  
+  pinMode(PINO_TRIG_DIR, OUTPUT);
+  pinMode(PINO_ECHO_DIR, INPUT);
   
   // Inicialização do Display OLED
   initDisplay();
@@ -102,7 +108,7 @@ void loop() {
             tempoInicioInsistir = millis();
           } else {
             contadorFalhas = 0; 
-            int erro = position - 3500;
+            int erro = 3500 - position;
             
             // Memoriza o lado para curvas fechadas
             if (erro > 500) ultimoLado = 1;       

@@ -1,14 +1,26 @@
 # 🤖 Projeto: Robô Seguidor de Linha Pro - Arduino Mega 2560
 
-## 📍 Mapeamento de Hardware (NÃO ALTERAR)
+## 📍 Mapeamento de Hardware
 - **Microcontrolador:** Arduino Mega 2560
-- **Sensores de Linha (IR):** QTR-8 (8 sensores) nos pinos Digitais 24, 25, 26, 27, 28, 29, 30, 31.
 - **Motores:** 4 motores DC via Motor Shield (M1, M2, M3, M4).
-- **Comunicação I2C:** Multiplexador TCA9548A.
-  - Porta 0: Giroscópio/Acelerômetro GY-521.
-  - Porta 1: Sensor RGB TCS34725 (Direito).
-  - Porta 2: Sensor RGB TCS34725 (Esquerdo).
-  - Porta 3: Display OLED SSD1306.
+- **Sensor de Refletância (QRE-8D):**
+  - 1: vermelho - 30
+  - 2: branco - 31
+  - 3: laranja - 32
+  - 4: verde - 33
+  - 5: amarelo - 34
+  - 6: cinza - 35
+  - 7: azul - 36
+  - 8: vermelho - 37
+- **Sensor Ultrassônico (HC-SR04):**
+  - **Frente:** TRIG - amarelo - 48 | ECHO - laranja - 49
+  - **Esquerda:** TRIG - amarelo - 50 | ECHO - laranja - 51
+  - **Direita:** TRIG - amarelo - 52 | ECHO - laranja - 53
+- **Comunicação I2C (Multiplexador TCA9548A):**
+  - **Porta 0 (Display OLED):** SDK - roxo - SD0 | SCK - azul - SC0
+  - **Porta 1 (Giroscópio GY-521):** SDA - roxo - SD1 | SCL - azul - SC1
+  - **Porta 2 (Sensor RGB TCS34725 - Direita):** SDA - roxo - SD2 | SCL - azul - SC2
+  - **Porta 3 (Sensor RGB TCS34725 - Esquerda):** SDA - roxo - SD3 | SCL - azul - SC3
 
 ## ⚙️ Arquitetura do Software (FSM)
 O robô opera através de uma Máquina de Estados Finitos:
