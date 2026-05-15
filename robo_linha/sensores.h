@@ -25,6 +25,10 @@ MPU6050 mpu(Wire);
 // Variável para controle não-bloqueante de leitura de cor
 unsigned long ultimaLeituraCor = 0;
 
+// Variáveis dinâmicas para calibração de luminosidade (ignorar sombras)
+uint16_t limiarLuminosidadeDir = 80;
+uint16_t limiarLuminosidadeEsq = 80;
+
 // Referências às variáveis globais em robo_linha.ino
 extern EstadoRobo estadoAtual;
 extern int tipoGiro;
@@ -70,23 +74,23 @@ void initSensores() {
 // LÓGICA DE VALIDAÇÃO DE CORES
 // ==============================================================================
 
-bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c) {
-  if (c < 80) return false;  // Ignora se estiver muito escuro
-  if (r < 100) return false; // Ignora se tiver pouco vermelho absoluto
+bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
+  if (c < limiarC) return false;  // Ignora se estiver muito escuro (provável linha preta ou sombra)
+  if (r < 80) return false; // Ignora se tiver pouco vermelho absoluto
 
-  // O Vermelho (R) precisa ser consideravelmente maior que o G e o B.
-  float margem = 1.25; 
+  // O Vermelho (R) precisa ser consideravelmente maior que o G e o B para evitar confusões com branco/amarelo.
+  float margem = 1.35; 
   if (r > (g * margem) && r > (b * margem)) {
     return true; 
   }
   return false;
 }
 
-bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c) {
-  if (c < 80) return false; 
-  if (g < 100) return false;
+bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
+  if (c < limiarC) return false;  // Ignora fundo preto (reduz chance de ler verde nas sombras)
+  if (g < 80) return false;
 
-  float margem = 1.185; 
+  float margem = 1.35; // Aumentamos a precisão da proporção: o verde tem que ser dominante
   if (g > (r * margem) && g > (b * margem)) {
     return true; 
   }
@@ -109,12 +113,12 @@ void verificarCores() {
   tcaselect(CANAL_TCS_ESQ);
   tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  // Validação comparativa (Aplica as margens seguras para evitar falso positivo)
-  bool verdeDir = ehVerde(rD, gD, bD, cD);
-  bool vermelhoDir = ehVermelho(rD, gD, bD, cD);
+  // Validação comparativa com os novos limiares dinâmicos
+  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool vermelhoDir = ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir);
   
-  bool verdeEsq = ehVerde(rE, gE, bE, cE);
-  bool vermelhoEsq = ehVermelho(rE, gE, bE, cE);
+  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
+  bool vermelhoEsq = ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq);
   
   // Regras de Decisão FSM
   if (vermelhoDir || vermelhoEsq) {
@@ -150,7 +154,11 @@ void executarCalibracao() {
   
   unsigned long tempoInicio = millis();
   unsigned long ultimoInversao = millis();
+  unsigned long ultimaLeituraCorCalib = 0;
   bool sentidoGiro = true; // true = Horário, false = Anti-horário
+  
+  uint16_t maxCDir = 0;
+  uint16_t maxCEsq = 0;
   
   // Aciona os motores para começar o giro sobre o próprio eixo
   rotacionarEixo(sentidoGiro, VELOCIDADE_BASE);
@@ -158,6 +166,20 @@ void executarCalibracao() {
   // Loop de calibração que dura exatamente 5 segundos (5000 ms)
   while (millis() - tempoInicio < 5000) {
     qtr.calibrate();
+    
+    // Leitura de cor em background para achar a luminosidade do fundo branco da pista
+    if (millis() - ultimaLeituraCorCalib > 100) {
+      ultimaLeituraCorCalib = millis();
+      uint16_t r, g, b, c;
+      
+      tcaselect(CANAL_TCS_DIR);
+      tcsDir.getRawData(&r, &g, &b, &c);
+      if (c > maxCDir) maxCDir = c;
+      
+      tcaselect(CANAL_TCS_ESQ);
+      tcsEsq.getRawData(&r, &g, &b, &c);
+      if (c > maxCEsq) maxCEsq = c;
+    }
     
     // Lógica de oscilação: Inverte o sentido dos motores a cada 500ms
     if (millis() - ultimoInversao >= 500) {
@@ -169,6 +191,14 @@ void executarCalibracao() {
   
   // Fim da calibração
   pararMotores();
+  
+  // Define o limiar de corte baseando-se em 30% da luminosidade encontrada no branco
+  limiarLuminosidadeDir = maxCDir * 0.30;
+  limiarLuminosidadeEsq = maxCEsq * 0.30;
+  
+  // Garante um piso de 80 caso a leitura esteja escura demais ou com problemas
+  if (limiarLuminosidadeDir < 80) limiarLuminosidadeDir = 80;
+  if (limiarLuminosidadeEsq < 80) limiarLuminosidadeEsq = 80;
   
   // Feedback de conclusão no OLED
   atualizarStatus("CALIBRACAO", "OK");

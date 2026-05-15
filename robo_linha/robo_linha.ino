@@ -188,12 +188,16 @@ void loop() {
 
       // 3. Controla o giro até atingir o alvo (+/- 3 graus de tolerância)
       if (abs(erroAngulo) > 3.0) {
+        // Velocidade do giro fica proporcional ao quanto falta (suavizando o overshoot e parando suave)
+        int velGiro = 80 + abs(erroAngulo) * 1.5; 
+        if (velGiro > 150) velGiro = 150; // Limite máximo para evitar inércia excessiva
+
         if (erroAngulo > 0) {
           // Virar para Esquerda (aumenta o Z)
-          controlarRodas(150, -150); 
+          controlarRodas(velGiro, -velGiro); 
         } else {
           // Virar para Direita (diminui o Z)
-          controlarRodas(-150, 150);
+          controlarRodas(-velGiro, velGiro);
         }
       } else {
         // Atingiu o ângulo!
@@ -203,6 +207,10 @@ void loop() {
         ultimoErro = 0;
         contadorFalhas = 0;
         modoLinha = SEGUINDO; // Garante que vai voltar caçando a linha
+
+        // PULO DO GATO: Bloqueia a leitura do sensor de cor por 1.5s após o giro!
+        // Isso impede que ele termine o giro, ainda esteja em cima da marcação, e gire novamente pro infinito.
+        ultimaLeituraCor = millis() + 1500;
 
         // Volta para a linha
         estadoAtual = ESTADO_LINHA;
