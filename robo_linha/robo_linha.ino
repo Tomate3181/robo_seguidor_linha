@@ -42,6 +42,10 @@ void setup() {
   // Inicializa o barramento I2C
   Wire.begin(); 
   
+  // APLICAÇÃO: Ativação do Timeout nativo para evitar congelamento por ruído elétrico
+  Wire.setWireTimeout(3000, true); // Tempo limite de 3ms. 'true' ativa o auto-reset do barramento
+  Wire.clearWireTimeoutFlag();     // Limpa erros residuais iniciais
+  
   Serial.println(F("======================================="));
   Serial.println(F("   Iniciando Robo Seguidor de Linha    "));
   Serial.println(F("======================================="));
@@ -71,6 +75,13 @@ void setup() {
 void loop() {
   // REGRA DE OURO: Código não-bloqueante. Não utilize delay() no loop principal!
   
+  // APLICAÇÃO: Verificação ativa contra travamento físico do barramento I2C
+  if (Wire.getWireTimeoutFlag()) {
+    Serial.println(F("[ALERTA] I2C travou por ruido! Forcando recuperacao..."));
+    Wire.clearWireTimeoutFlag(); // Destrava limpando o erro interno
+    tcaselect(CANAL_GY521);      // Força o reestabelecimento do canal do giroscópio no TCA
+  }
+  
   // Atualiza o giroscópio a cada ciclo para o rastreio do Yaw(Z) não perder precisão
   tcaselect(CANAL_GY521);
   mpu.update();
@@ -84,6 +95,8 @@ void loop() {
     case ESTADO_LINHA: {
       // Leitura da posição da linha e dos sensores
       uint16_t position = qtr.readLineBlack(sensorValues);
+      
+      // Varre TODOS os 8 sensores procurando qualquer indício de preto (> 200)
       bool vendoLinha = false;
       for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
         if (sensorValues[i] > 200) {
@@ -130,8 +143,8 @@ void loop() {
             if (ultimoLado == 1) controlarRodas(180, -100); 
             else controlarRodas(-100, 180);
 
-            // Se reencontrou a linha (sensores centrais)
-            if (vendoLinha && (sensorValues[3] > 400 || sensorValues[4] > 400)) {
+            // CORREÇÃO: Aceita a linha em QUALQUER uma das abas dos 8 sensores para se recuperar
+            if (vendoLinha) {
               modoLinha = SEGUINDO; 
             }
           } else {
@@ -151,13 +164,16 @@ void loop() {
           // Avança pelo tempo determinado para buscar a linha após um gap
           if (millis() - tempoInicioGap < TEMPO_PARA_12CM) {
             controlarRodas(VELOCIDADE_GAP, VELOCIDADE_GAP);
-            if (vendoLinha && (sensorValues[3] > 400 || sensorValues[4] > 400)) {
-              modoLinha = SEGUINDO; // Encontrou a linha do outro lado do gap
+            
+            // CORREÇÃO: Monitora os 8 sensores. Se o robô estiver torto no meio do Gap 
+            // e a linha bater em uma das pontas, ele captura instantaneamente.
+            if (vendoLinha) {
+              modoLinha = SEGUINDO; 
             }
           } else {
-            // Não encontrou andando para frente, recua
+            // Não encontrou andando para frente, recua procurando nos 8 sensores
             controlarRodas(-VELOCIDADE_GAP, -VELOCIDADE_GAP);
-            if (vendoLinha && (sensorValues[3] > 400 || sensorValues[4] > 400)) {
+            if (vendoLinha) {
               modoLinha = SEGUINDO;
             }
           }
@@ -167,6 +183,12 @@ void loop() {
           // Dá ré por 2 segundos após falhar várias vezes no gap
           if (millis() - tempoInicioGap < 2000) {
             controlarRodas(-100, -100);
+            
+            // Se durante a marcha ré algum dos 8 sensores encostar na linha, aborta o re-ajuste
+            if (vendoLinha) {
+              contadorFalhas = 0;
+              modoLinha = SEGUINDO;
+            }
           } else {
             contadorFalhas = 0;
             modoLinha = SEGUINDO; // Retoma a tentativa de seguir
@@ -179,7 +201,6 @@ void loop() {
     case ESTADO_VERDE: {
       // 1. Define o ângulo alvo com base no tipo de giro
       // Convenção MPU: Giro pra Esquerda (+) / Giro pra Direita (-)
-      // Como 90 é Direita e -90 é Esquerda na nossa lógica:
       float anguloAlvo = anguloInicial - tipoGiro; 
       
       // 2. Obtém o ângulo atual do MPU (já atualizado no topo do loop)
@@ -188,15 +209,12 @@ void loop() {
 
       // 3. Controla o giro até atingir o alvo (+/- 3 graus de tolerância)
       if (abs(erroAngulo) > 3.0) {
-        // Velocidade do giro fica proporcional ao quanto falta (suavizando o overshoot e parando suave)
         int velGiro = 80 + abs(erroAngulo) * 1.5; 
         if (velGiro > 150) velGiro = 150; // Limite máximo para evitar inércia excessiva
 
         if (erroAngulo > 0) {
-          // Virar para Esquerda (aumenta o Z)
           controlarRodas(velGiro, -velGiro); 
         } else {
-          // Virar para Direita (diminui o Z)
           controlarRodas(-velGiro, velGiro);
         }
       } else {
@@ -208,8 +226,7 @@ void loop() {
         contadorFalhas = 0;
         modoLinha = SEGUINDO; // Garante que vai voltar caçando a linha
 
-        // PULO DO GATO: Bloqueia a leitura do sensor de cor por 1.5s após o giro!
-        // Isso impede que ele termine o giro, ainda esteja em cima da marcação, e gire novamente pro infinito.
+        // Bloqueia a leitura do sensor de cor por 1.5s após o giro
         ultimaLeituraCor = millis() + 1500;
 
         // Volta para a linha
@@ -222,9 +239,6 @@ void loop() {
     case ESTADO_VERMELHO:
       // Parada Total Imediata
       controlarRodas(0, 0);
-      
-      // Poderíamos piscar um LED aqui, mas a regra de segurança do Vermelho 
-      // do robô antigo dizia para parar e esperar resgatar o robô
       break;
 
     case ESTADO_OBSTACULO:
@@ -232,7 +246,6 @@ void loop() {
       break;
 
     default:
-      // Fallback de segurança para garantir que o robô não trave em um estado inexistente
       estadoAtual = ESTADO_LINHA;
       break;
   }

@@ -29,6 +29,17 @@ unsigned long ultimaLeituraCor = 0;
 uint16_t limiarLuminosidadeDir = 80;
 uint16_t limiarLuminosidadeEsq = 80;
 
+// ESTRUTURA PARA SALVAR A ASSINATURA RGB DO VERDE CALIBRADO
+struct AssinaturaCor {
+  uint16_t r;
+  uint16_t g;
+  uint16_t b;
+  uint16_t c;
+};
+
+AssinaturaCor verdeCalibradoDir = {0, 0, 0, 0};
+AssinaturaCor verdeCalibradoEsq = {0, 0, 0, 0};
+
 // Referências às variáveis globais em robo_linha.ino
 extern EstadoRobo estadoAtual;
 extern int tipoGiro;
@@ -39,34 +50,25 @@ extern float anguloInicial;
 // ==============================================================================
 
 void initSensores() {
-  // Configurando sensores IR como RC
   qtr.setTypeRC();
   qtr.setSensorPins(PINOS_IR, NUM_SENSORES_IR);
   
-  // Inicializa Sensor RGB Direito (Porta 1)
   tcaselect(CANAL_TCS_DIR);
   if (!tcsDir.begin()) {
     Serial.println(F("ERRO: TCS Direito não encontrado!"));
   }
   
-  // Inicializa Sensor RGB Esquerdo (Porta 2)
   tcaselect(CANAL_TCS_ESQ);
   if (!tcsEsq.begin()) {
     Serial.println(F("ERRO: TCS Esquerdo não encontrado!"));
   }
   
-  // Inicializa Giroscópio (Porta 0)
   tcaselect(CANAL_GY521);
   byte status = mpu.begin();
   if(status != 0) {
     Serial.println(F("ERRO: MPU6050 não encontrado!"));
   } else {
-    Serial.println(F("Calculando offsets do MPU... Não mova o robô!"));
-    atualizarStatus("Giroscopio", "Calibrando");
-    // O delay aqui é aceitável pois está no setup
-    delay(1000); 
-    mpu.calcOffsets(true,true);
-    atualizarStatus("Giroscopio", "OK");
+    Serial.println(F("MPU Encontrado. Pronto para calibracao de pista."));
   }
 }
 
@@ -75,10 +77,9 @@ void initSensores() {
 // ==============================================================================
 
 bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
-  if (c < limiarC) return false;  // Ignora se estiver muito escuro (provável linha preta ou sombra)
-  if (r < 80) return false; // Ignora se tiver pouco vermelho absoluto
+  if (c < limiarC) return false;  
+  if (r < 80) return false; 
 
-  // O Vermelho (R) precisa ser consideravelmente maior que o G e o B para evitar confusões com branco/amarelo.
   float margem = 1.35; 
   if (r > (g * margem) && r > (b * margem)) {
     return true; 
@@ -86,127 +87,230 @@ bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC
   return false;
 }
 
-bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
-  if (c < limiarC) return false;  // Ignora fundo preto (reduz chance de ler verde nas sombras)
-  if (g < 80) return false;
+bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC, AssinaturaCor calibrado) {
+  if (c < limiarC) return false;  
 
-  float margem = 1.35; // Aumentamos a precisão da proporção: o verde tem que ser dominante
-  if (g > (r * margem) && g > (b * margem)) {
-    return true; 
+  if (calibrado.g == 0) {
+    return (g > (r * 1.30) && g > (b * 1.30) && g >= 60);
+  }
+
+  // Margem de erro baseada nas proporções calibradas
+  float minTolerancia = 0.75; 
+  float maxTolerancia = 1.25;
+
+  float proporcaoRG_atual = (float)r / g;
+  float proporcaoBG_atual = (float)b / g;
+
+  float proporcaoRG_calibrado = (float)calibrado.r / calibrado.g;
+  float proporcaoBG_calibrado = (float)calibrado.b / calibrado.g;
+
+  // O verde atual precisa ser pelo menos 55% do pico máximo absoluto que você calibrou
+  if (g < (calibrado.g * 0.55)) return false;
+
+  bool proporcaoRedOK   = (proporcaoRG_atual >= proporcaoRG_calibrado * minTolerancia) && (proporcaoRG_atual <= proporcaoRG_calibrado * maxTolerancia);
+  bool proporcaoBlueOK  = (proporcaoBG_atual >= proporcaoBG_calibrado * minTolerancia) && (proporcaoBG_atual <= proporcaoBG_calibrado * maxTolerancia);
+  bool verdeDominante   = (g > (r * 1.20) && g > (b * 1.20));
+
+  if (proporcaoRedOK && proporcaoBlueOK && verdeDominante) {
+    return true;
   }
   return false;
 }
 
 void verificarCores() {
-  // Executa a leitura apenas a cada 50ms para não atrasar o controle PID da linha
   if (millis() - ultimaLeituraCor < 50) return;
   ultimaLeituraCor = millis();
   
   uint16_t rD, gD, bD, cD;
   uint16_t rE, gE, bE, cE;
   
-  // Leitura RGB Direito
   tcaselect(CANAL_TCS_DIR);
   tcsDir.getRawData(&rD, &gD, &bD, &cD);
   
-  // Leitura RGB Esquerdo
   tcaselect(CANAL_TCS_ESQ);
   tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  // Validação comparativa com os novos limiares dinâmicos
-  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir, verdeCalibradoDir);
   bool vermelhoDir = ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir);
   
-  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
+  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq, verdeCalibradoEsq);
   bool vermelhoEsq = ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq);
   
-  // Regras de Decisão FSM
+  // ==========================================================================
+  // DEBUGGER NO MONITOR SERIAL (A cada 300ms para não travar o Arduino)
+  // ==========================================================================
+  static unsigned long tempoUltimoPrint = 0;
+  if (millis() - tempoUltimoPrint > 300) {
+    tempoUltimoPrint = millis();
+    
+    Serial.println(F("\n--- [DEBUGGER TCS34725] ---"));
+    // Infos do Sensor Direito
+    Serial.print(F("DIR -> R: ")); Serial.print(rD);
+    Serial.print(F(" | G: ")); Serial.print(gD);
+    Serial.print(F(" | B: ")); Serial.print(bD);
+    Serial.print(F(" | C: ")); Serial.print(cD);
+    Serial.print(F(" | LimiarC: ")); Serial.print(limiarLuminosidadeDir);
+    Serial.print(F(" | VERDE? ")); Serial.println(verdeDir ? F("[SIM]") : F("nao"));
+    
+    // Infos do Sensor Esquerdo
+    Serial.print(F("ESQ -> R: ")); Serial.print(rE);
+    Serial.print(F(" | G: ")); Serial.print(gE);
+    Serial.print(F(" | B: ")); Serial.print(bE);
+    Serial.print(F(" | C: ")); Serial.print(cE);
+    Serial.print(F(" | LimiarC: ")); Serial.print(limiarLuminosidadeEsq);
+    Serial.print(F(" | VERDE? ")); Serial.println(verdeEsq ? F("[SIM]") : F("nao"));
+  }
+  // ==========================================================================
+
   if (vermelhoDir || vermelhoEsq) {
+    pararMotores();
     estadoAtual = ESTADO_VERMELHO;
     atualizarStatus("COR", "VERMELHO");
     return;
   }
   
+  bool detectouVerde = false;
+
   if (verdeDir && verdeEsq) {
-    estadoAtual = ESTADO_VERDE;
     tipoGiro = 180;
-    anguloInicial = mpu.getAngleZ(); // Salva o ângulo atual
-    atualizarStatus("VERDE DUPLO", "Giro 180");
-    return;
+    atualizarStatus("VERDE DUPLO", "Alinhando 180");
+    detectouVerde = true;
   } else if (verdeDir) {
-    estadoAtual = ESTADO_VERDE;
     tipoGiro = 90;
-    anguloInicial = mpu.getAngleZ(); // Salva o ângulo atual
-    atualizarStatus("VERDE DIR", "Giro 90");
-    return;
+    atualizarStatus("VERDE DIR", "Alinhando 90");
+    detectouVerde = true;
   } else if (verdeEsq) {
-    estadoAtual = ESTADO_VERDE;
     tipoGiro = -90;
-    anguloInicial = mpu.getAngleZ(); // Salva o ângulo atual
-    atualizarStatus("VERDE ESQ", "Giro -90");
-    return;
+    atualizarStatus("VERDE ESQ", "Alinhando -90");
+    detectouVerde = true;
+  }
+
+  if (detectouVerde) {
+    controlarRodas(110, 110); 
+    delay(150); 
+    pararMotores();
+    delay(50); 
+
+    tcaselect(CANAL_GY521);
+    mpu.update();
+    anguloInicial = mpu.getAngleZ(); 
+    
+    estadoAtual = ESTADO_VERDE; 
   }
 }
 
 void executarCalibracao() {
-  // Feedback visual no OLED
-  atualizarStatus("Sistema", "CALIBRANDO...");
-  
-  unsigned long tempoInicio = millis();
-  unsigned long ultimoInversao = millis();
-  unsigned long ultimaLeituraCorCalib = 0;
-  bool sentidoGiro = true; // true = Horário, false = Anti-horário
+  pararMotores(); 
+  Serial.println(F("\n====== [CALIBRAÇÃO MANUAL EXPANDIDA] ======"));
   
   uint16_t maxCDir = 0;
   uint16_t maxCEsq = 0;
   
-  // Aciona os motores para começar o giro sobre o próprio eixo
-  rotacionarEixo(sentidoGiro, VELOCIDADE_BASE);
+  // ==========================================================================
+  // FASE 1: LINHA PRETA E FUNDO BRANCO (5 SEGUNDOS)
+  // ==========================================================================
+  unsigned long tempoInicio = millis();
+  int segundosRestantes = 5;
   
-  // Loop de calibração que dura exatamente 5 segundos (5000 ms)
   while (millis() - tempoInicio < 5000) {
+    int tempoPassado = (millis() - tempoInicio) / 1000;
+    if (5 - tempoPassado != segundosRestantes) {
+      segundosRestantes = 5 - tempoPassado;
+      String msgTempo = "Fundo/Linha: " + String(segundosRestantes) + "s";
+      atualizarStatus("Fase 1/3", msgTempo.c_str());
+    }
+    
     qtr.calibrate();
     
-    // Leitura de cor em background para achar a luminosidade do fundo branco da pista
-    if (millis() - ultimaLeituraCorCalib > 100) {
-      ultimaLeituraCorCalib = millis();
-      uint16_t r, g, b, c;
-      
-      tcaselect(CANAL_TCS_DIR);
-      tcsDir.getRawData(&r, &g, &b, &c);
-      if (c > maxCDir) maxCDir = c;
-      
-      tcaselect(CANAL_TCS_ESQ);
-      tcsEsq.getRawData(&r, &g, &b, &c);
-      if (c > maxCEsq) maxCEsq = c;
+    uint16_t r, g, b, c;
+    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&r, &g, &b, &c); if (c > maxCDir) maxCDir = c;
+    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&r, &g, &b, &c); if (c > maxCEsq) maxCEsq = c;
+    delay(10);
+  }
+
+  // ==========================================================================
+  // FASE 2: CALIBRAÇÃO COM GATILHO DE MAIOR GREEN DOMINANTE (5 SEGUNDOS)
+  // ==========================================================================
+  tempoInicio = millis();
+  segundosRestantes = 5;
+  Serial.println(F("[FASE 2] PASSE O SENSOR SOBRE O QUADRADO VERDE..."));
+  
+  while (millis() - tempoInicio < 5000) {
+    int tempoPassado = (millis() - tempoInicio) / 1000;
+    if (5 - tempoPassado != segundosRestantes) {
+      segundosRestantes = 5 - tempoPassado;
+      String msgTempo = "Passe no VERDE: " + String(segundosRestantes) + "s";
+      atualizarStatus("Fase 2/3", msgTempo.c_str());
     }
     
-    // Lógica de oscilação: Inverte o sentido dos motores a cada 500ms
-    if (millis() - ultimoInversao >= 500) {
-      sentidoGiro = !sentidoGiro; // Inverte o valor booleano
-      rotacionarEixo(sentidoGiro, VELOCIDADE_BASE); // Aplica a nova direção
-      ultimoInversao = millis();  // Reseta o temporizador de inversão
+    uint16_t rD, gD, bD, cD;
+    uint16_t rE, gE, bE, cE;
+    
+    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
+    
+    // GATILHO INTELIGENTE DIREITO:
+    // Só atualiza se o 'Green' atual for maior que o recorde anterior E o 'Green' for maior que o Red e Blue (provando que não é o branco da pista)
+    if (gD > verdeCalibradoDir.g && gD > rD && gD > bD) {
+      verdeCalibradoDir.r = rD;
+      verdeCalibradoDir.g = gD;
+      verdeCalibradoDir.b = bD;
+      verdeCalibradoDir.c = cD;
     }
+    
+    // GATILHO INTELIGENTE ESQUERDO:
+    if (gE > verdeCalibradoEsq.g && gE > rE && gE > bE) {
+      verdeCalibradoEsq.r = rE;
+      verdeCalibradoEsq.g = gE;
+      verdeCalibradoEsq.b = bE;
+      verdeCalibradoEsq.c = cE;
+    }
+    delay(10);
   }
   
-  // Fim da calibração
-  pararMotores();
+  Serial.println(F("\n--- MAPA DA ASSINATURA DO VERDE GRAVADA ---"));
+  Serial.print(F("[DIR] R:")); Serial.print(verdeCalibradoDir.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoDir.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoDir.b);
+  Serial.print(F("[ESQ] R:")); Serial.print(verdeCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoEsq.b);
+
+  // ==========================================================================
+  // FASE 3: POSICIONAMENTO NA LINHA (5 SEGUNDOS)
+  // ==========================================================================
+  tempoInicio = millis();
+  segundosRestantes = 5;
+  Serial.println(F("[FASE 3] COLOQUE O ROBÔ PARADO NA LINHA DE LARGADA..."));
   
-  // Define o limiar de corte baseando-se em 30% da luminosidade encontrada no branco
+  while (millis() - tempoInicio < 5000) {
+    int tempoPassado = (millis() - tempoInicio) / 1000;
+    if (5 - tempoPassado != segundosRestantes) {
+      segundosRestantes = 5 - tempoPassado;
+      String msgTempo = "Alinhe na pista: " + String(segundosRestantes) + "s";
+      atualizarStatus("Fase 3/3", msgTempo.c_str());
+    }
+    delay(50);
+  }
+
+  // ==========================================================================
+  // FASE 4: REGISTRO ESTÁTICO DO GIROSCÓPIO
+  // ==========================================================================
+  atualizarStatus("IMU", "Gravando Zeros...");
+  tcaselect(CANAL_GY521);
+  delay(50);
+  
+  mpu.calcOffsets(true, true);
+  
   limiarLuminosidadeDir = maxCDir * 0.30;
   limiarLuminosidadeEsq = maxCEsq * 0.30;
-  
-  // Garante um piso de 80 caso a leitura esteja escura demais ou com problemas
   if (limiarLuminosidadeDir < 80) limiarLuminosidadeDir = 80;
   if (limiarLuminosidadeEsq < 80) limiarLuminosidadeEsq = 80;
   
-  // Feedback de conclusão no OLED
-  atualizarStatus("CALIBRACAO", "OK");
+  // Casos de erro/segurança (se você não passar no verde na calibração por engano)
+  if (verdeCalibradoDir.g == 0) { verdeCalibradoDir.r = 45; verdeCalibradoDir.g = 100; verdeCalibradoDir.b = 50; }
+  if (verdeCalibradoEsq.g == 0) { verdeCalibradoEsq.r = 45; verdeCalibradoEsq.g = 100; verdeCalibradoEsq.b = 50; }
   
-  // Apenas nesta rotina específica do Setup inicial o uso de delay() é aceitável
+  Serial.println(F("====== [CALIBRAÇÃO CONCLUÍDA COM SUCESSO] ======\n"));
+  atualizarStatus("CALIBRACAO", "PRONTO! CORRE");
   delay(1000); 
   
-  // Transição de Estado
   estadoAtual = ESTADO_LINHA;
 }
 

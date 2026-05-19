@@ -46,4 +46,4 @@ Após analisar todos os arquivos criados e refatorados, nossa Arquitetura Não-B
    - Faça uma pequena saia lateral no QRE-8D de fita isolante ou plástico preto opaco para fazer sombra. Reflexos do sol ou luzes da sala interferem absurdamente em competições de seguidor de linha, especialmente perto de marcações verdes.
 
 ---
-**Resumo:** O esqueleto que criamos não só está profissional, como é escalável para qualquer tamanho de pista. O diferencial competitivo será a navegação com o **Wall-Follower Assíncrono** que você fará amanhã. Sucesso e rumo ao primeiro lugar! 🏆🤖
+**Resumo:** O esqueleto que criamos não só está profissional, como é escalável para qualquer tamanho de pista. O diferencial competitivo será a navegação com o **Wall-Follower Assíncrono** que ainda será realizado. Sucesso e rumo ao primeiro lugar! 🏆🤖

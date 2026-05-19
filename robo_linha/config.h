@@ -59,7 +59,7 @@ const float KI = 0.0;  // Constante Integral (Geralmente 0 para seguidor de linh
 const int VELOCIDADE_BASE = 150; 
 const int VELOCIDADE_MAX = 255;  
 const int VELOCIDADE_GAP = 130;
-const int TEMPO_PARA_12CM = 1250; // Tempo em ms para andar 12cm
+const int TEMPO_PARA_12CM = 1000; // Tempo em ms para andar 12cm
 
 // ==============================================================================
 // MODOS DE OPERAÇÃO DA LINHA (Sub-estados Não-Bloqueantes)
