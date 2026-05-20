@@ -25,21 +25,23 @@ extern void tcaselect(uint8_t i);
 void initDisplay() {
   // 1. Abre a comunicação I2C no canal 0 (CANAL_OLED definido no config.h)
   tcaselect(CANAL_OLED);
+  delay(50); // Dá tempo para o multiplexador chavear o canal fisicamente antes do ping
   
-  // 2. Inicializa o display no endereço I2C 0x3C
-  // SSD1306_SWITCHCAPVCC = gerar a alta voltagem a partir do 3.3v interno
+  // 2. Inicializa o display testando os dois endereços mais comuns (0x3C e 0x3D)
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("Falha ao inicializar o SSD1306 (OLED)"));
-    // Apenas avisa via serial, mas não trava o robô para evitar que pare na pista
-  } else {
-    // Configuração inicial visual
-    display.clearDisplay();
-    display.setTextSize(1);              // Tamanho normal do texto
-    display.setTextColor(SSD1306_WHITE); // Texto em "branco" (pixels acesos)
-    display.setCursor(0, 0);             // Canto superior esquerdo
-    display.println(F("OLED OK!"));
-    display.display();                   // Envia o buffer para a tela
+    if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
+      Serial.println(F("Falha ao inicializar o OLED. Verifique os cabos SDA/SCL!"));
+      return; // Aborta a pintura inicial para não travar
+    }
   }
+  
+  // Configuração inicial visual
+  display.clearDisplay();
+  display.setTextSize(1);              // Tamanho normal do texto
+  display.setTextColor(SSD1306_WHITE); // Texto em "branco" (pixels acesos)
+  display.setCursor(0, 0);             // Canto superior esquerdo
+  display.println(F("OLED OK!"));
+  display.display();                   // Envia o buffer para a tela
 }
 
 // ==============================================================================

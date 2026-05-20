@@ -37,6 +37,10 @@ void tcaselect(uint8_t i) {
 // SETUP
 // ==============================================================================
 void setup() {
+  // Aguarda 200ms para estabilização da energia de todos os módulos I2C (OLED, Sensores)
+  // Isso previne que o Arduino tente se comunicar antes do OLED estar 'acordado'
+  delay(200);
+  
   Serial.begin(115200);
   
   // Inicializa o barramento I2C
@@ -123,9 +127,10 @@ void loop() {
             contadorFalhas = 0; 
             int erro = 3500 - position;
             
-            // Memoriza o lado para curvas fechadas
+            // Memoriza o lado para curvas fechadas, mas zera se estiver andando reto
             if (erro > 500) ultimoLado = 1;       
             else if (erro < -500) ultimoLado = -1; 
+            else if (abs(erro) < 300) ultimoLado = 0; // Se perder a linha no gap, não vai girar loucamente!
 
             // Cálculo do PID
             int P = erro * KP;
@@ -138,10 +143,12 @@ void loop() {
           break;
 
         case INSISTINDO:
-          // Tenta insistir na curva por 150ms
-          if (millis() - tempoInicioInsistir < 150) {
-            if (ultimoLado == 1) controlarRodas(180, -100); 
-            else controlarRodas(-100, 180);
+          // Tenta insistir na curva por 300ms (dá mais tempo para virar os 90 graus)
+          if (millis() - tempoInicioInsistir < 300) {
+            // Mais força na virada se estava em curva. Se estava reto (ultimoLado == 0), apenas vai reto
+            if (ultimoLado == 1) controlarRodas(220, -180); 
+            else if (ultimoLado == -1) controlarRodas(-180, 220);
+            else controlarRodas(VELOCIDADE_BASE, VELOCIDADE_BASE); // Gap! Vai reto.
 
             // CORREÇÃO: Aceita a linha em QUALQUER uma das abas dos 8 sensores para se recuperar
             if (vendoLinha) {
