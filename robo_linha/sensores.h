@@ -87,33 +87,53 @@ bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC
   return false;
 }
 
-bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC, AssinaturaCor calibrado) {
-  if (c < limiarC) return false;  
-
-  if (calibrado.g == 0) {
-    return (g > (r * 1.30) && g > (b * 1.30) && g >= 60);
+float calcularHue(float r, float g, float b) {
+  float maxVal = max(r, max(g, b));
+  float minVal = min(r, min(g, b));
+  float delta = maxVal - minVal;
+  if (delta == 0) return 0;
+  
+  float hue = 0;
+  if (maxVal == r) {
+    hue = 60.0 * ((g - b) / delta);
+  } else if (maxVal == g) {
+    hue = 60.0 * ((b - r) / delta + 2.0);
+  } else if (maxVal == b) {
+    hue = 60.0 * ((r - g) / delta + 4.0);
   }
+  if (hue < 0) hue += 360.0;
+  return hue;
+}
 
-  // Margem de erro baseada nas proporções calibradas
-  float minTolerancia = 0.75; 
-  float maxTolerancia = 1.25;
+float calcularSaturacao(float r, float g, float b) {
+  float maxVal = max(r, max(g, b));
+  float minVal = min(r, min(g, b));
+  if (maxVal == 0) return 0;
+  return (maxVal - minVal) / maxVal;
+}
 
-  float proporcaoRG_atual = (float)r / g;
-  float proporcaoBG_atual = (float)b / g;
+bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
+  // Filtro absoluto de ruído do sensor (valores muito baixos são lixo)
+  if (g < 25) return false;
 
-  float proporcaoRG_calibrado = (float)calibrado.r / calibrado.g;
-  float proporcaoBG_calibrado = (float)calibrado.b / calibrado.g;
+  float hue = calcularHue(r, g, b);
+  float sat = calcularSaturacao(r, g, b);
 
-  // O verde atual precisa ser pelo menos 55% do pico máximo absoluto que você calibrou
-  if (g < (calibrado.g * 0.55)) return false;
+  // CONDIÇÃO 1: Verde Inegável (Fita Escura centralizada no sensor)
+  // Alta saturação e G muito dominante. Ignoramos o limiarC porque fitas escuras refletem pouco.
+  bool verdeForte = (hue >= 95.0 && hue <= 165.0 && sat >= 0.35 && g > (r * 1.25) && g > (b * 1.25));
 
-  bool proporcaoRedOK   = (proporcaoRG_atual >= proporcaoRG_calibrado * minTolerancia) && (proporcaoRG_atual <= proporcaoRG_calibrado * maxTolerancia);
-  bool proporcaoBlueOK  = (proporcaoBG_atual >= proporcaoBG_calibrado * minTolerancia) && (proporcaoBG_atual <= proporcaoBG_calibrado * maxTolerancia);
-  bool verdeDominante   = (g > (r * 1.20) && g > (b * 1.20));
-
-  if (proporcaoRedOK && proporcaoBlueOK && verdeDominante) {
+  if (verdeForte) {
     return true;
   }
+
+  // CONDIÇÃO 2: Verde de Borda (Metade fita, metade chão branco)
+  // Como pega o chão branco, a luminosidade (C) sobe, mas a saturação cai. 
+  // Exigimos que C seja alto (maior que o chão preto) para não pegar sombras pretas, e G levemente dominante.
+  if (c >= limiarC && hue >= 95.0 && hue <= 165.0 && sat >= 0.18 && g > (r * 1.10) && g > (b * 1.10)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -130,10 +150,10 @@ void verificarCores() {
   tcaselect(CANAL_TCS_ESQ);
   tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir, verdeCalibradoDir);
+  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
   bool vermelhoDir = ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir);
   
-  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq, verdeCalibradoEsq);
+  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
   bool vermelhoEsq = ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq);
   
   // ==========================================================================
@@ -145,19 +165,19 @@ void verificarCores() {
     
     Serial.println(F("\n--- [DEBUGGER TCS34725] ---"));
     // Infos do Sensor Direito
-    Serial.print(F("DIR -> R: ")); Serial.print(rD);
-    Serial.print(F(" | G: ")); Serial.print(gD);
-    Serial.print(F(" | B: ")); Serial.print(bD);
-    Serial.print(F(" | C: ")); Serial.print(cD);
-    Serial.print(F(" | LimiarC: ")); Serial.print(limiarLuminosidadeDir);
+    Serial.print(F("DIR -> R:")); Serial.print(rD);
+    Serial.print(F(" G:")); Serial.print(gD);
+    Serial.print(F(" B:")); Serial.print(bD);
+    Serial.print(F(" Hue:")); Serial.print(calcularHue(rD, gD, bD), 1);
+    Serial.print(F(" Sat:")); Serial.print(calcularSaturacao(rD, gD, bD), 2);
     Serial.print(F(" | VERDE? ")); Serial.println(verdeDir ? F("[SIM]") : F("nao"));
     
     // Infos do Sensor Esquerdo
-    Serial.print(F("ESQ -> R: ")); Serial.print(rE);
-    Serial.print(F(" | G: ")); Serial.print(gE);
-    Serial.print(F(" | B: ")); Serial.print(bE);
-    Serial.print(F(" | C: ")); Serial.print(cE);
-    Serial.print(F(" | LimiarC: ")); Serial.print(limiarLuminosidadeEsq);
+    Serial.print(F("ESQ -> R:")); Serial.print(rE);
+    Serial.print(F(" G:")); Serial.print(gE);
+    Serial.print(F(" B:")); Serial.print(bE);
+    Serial.print(F(" Hue:")); Serial.print(calcularHue(rE, gE, bE), 1);
+    Serial.print(F(" Sat:")); Serial.print(calcularSaturacao(rE, gE, bE), 2);
     Serial.print(F(" | VERDE? ")); Serial.println(verdeEsq ? F("[SIM]") : F("nao"));
   }
   // ==========================================================================
@@ -186,8 +206,9 @@ void verificarCores() {
   }
 
   if (detectouVerde) {
-    controlarRodas(110, 110); 
-    delay(150); 
+    // Avança um pouco para alinhar o eixo de rotação do robô com a interseção antes de girar
+    controlarRodas(130, 130); 
+    delay(350); // Aumentado para o robô adentrar mais no cruzamento
     pararMotores();
     delay(50); 
 
@@ -298,10 +319,10 @@ void executarCalibracao() {
   
   mpu.calcOffsets(true, true);
   
-  limiarLuminosidadeDir = maxCDir * 0.30;
-  limiarLuminosidadeEsq = maxCEsq * 0.30;
-  if (limiarLuminosidadeDir < 80) limiarLuminosidadeDir = 80;
-  if (limiarLuminosidadeEsq < 80) limiarLuminosidadeEsq = 80;
+  limiarLuminosidadeDir = maxCDir * 0.15; // Reduzido para não ignorar o verde escuro
+  limiarLuminosidadeEsq = maxCEsq * 0.15;
+  if (limiarLuminosidadeDir < 40) limiarLuminosidadeDir = 40; // Piso menor para fitas que refletem pouca luz
+  if (limiarLuminosidadeEsq < 40) limiarLuminosidadeEsq = 40;
   
   // Casos de erro/segurança (se você não passar no verde na calibração por engano)
   if (verdeCalibradoDir.g == 0) { verdeCalibradoDir.r = 45; verdeCalibradoDir.g = 100; verdeCalibradoDir.b = 50; }
