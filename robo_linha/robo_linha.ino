@@ -80,11 +80,11 @@ void loop() {
   // REGRA DE OURO: Código não-bloqueante. Não utilize delay() no loop principal!
   
   // APLICAÇÃO: Verificação ativa contra travamento físico do barramento I2C
-  if (Wire.getWireTimeoutFlag()) {
-    Serial.println(F("[ALERTA] I2C travou por ruido! Forcando recuperacao..."));
-    Wire.clearWireTimeoutFlag(); // Destrava limpando o erro interno
-    tcaselect(CANAL_GY521);      // Força o reestabelecimento do canal do giroscópio no TCA
-  }
+  // if (Wire.getWireTimeoutFlag()) {
+  //   Serial.println(F("[ALERTA] I2C travou por ruido! Forcando recuperacao..."));
+  //   Wire.clearWireTimeoutFlag(); // Destrava limpando o erro interno
+  //   tcaselect(CANAL_GY521);      // Força o reestabelecimento do canal do giroscópio no TCA
+  // }
   
   // Atualiza o giroscópio a cada ciclo para o rastreio do Yaw(Z) não perder precisão
   tcaselect(CANAL_GY521);

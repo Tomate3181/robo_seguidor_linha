@@ -113,24 +113,32 @@ float calcularSaturacao(float r, float g, float b) {
 }
 
 bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
+  // Filtro de Ruído: Se C < limiar_minimo, ignorar leitura (luz insuficiente/fora da pista).
+  if (c < limiarC) return false;
+  
   // Filtro absoluto de ruído do sensor (valores muito baixos são lixo)
-  if (g < 25) return false;
-
+  if (g < 50) return false;
+  if (c > 60000) return false;
+  
   float hue = calcularHue(r, g, b);
   float sat = calcularSaturacao(r, g, b);
 
+  // Range Hue Verde: [95.0 - 165.0]
+  bool hueValido = (hue >= 95.0 && hue <= 165.0);
+
   // CONDIÇÃO 1: Verde Inegável (Fita Escura centralizada no sensor)
-  // Alta saturação e G muito dominante. Ignoramos o limiarC porque fitas escuras refletem pouco.
-  bool verdeForte = (hue >= 95.0 && hue <= 165.0 && sat >= 0.35 && g > (r * 1.25) && g > (b * 1.25));
+  // Saturação Mínima: 0.35 (Fita central)
+  bool verdeForte = (hueValido && sat >= 0.35 && g > (r * 1.25) && g > (b * 1.25));
 
   if (verdeForte) {
     return true;
   }
 
   // CONDIÇÃO 2: Verde de Borda (Metade fita, metade chão branco)
-  // Como pega o chão branco, a luminosidade (C) sobe, mas a saturação cai. 
-  // Exigimos que C seja alto (maior que o chão preto) para não pegar sombras pretas, e G levemente dominante.
-  if (c >= limiarC && hue >= 95.0 && hue <= 165.0 && sat >= 0.18 && g > (r * 1.10) && g > (b * 1.10)) {
+  // Saturação Mínima: 0.18 (Borda)
+  bool verdeBorda = (hueValido && sat >= 0.18 && g > (r * 1.10) && g > (b * 1.10));
+
+  if (verdeBorda) {
     return true;
   }
 
@@ -138,7 +146,7 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 }
 
 void verificarCores() {
-  if (millis() - ultimaLeituraCor < 50) return;
+  if (millis() - ultimaLeituraCor < 10) return; // Tempo de loop ajustado para 10ms
   ultimaLeituraCor = millis();
   
   uint16_t rD, gD, bD, cD;
@@ -150,12 +158,34 @@ void verificarCores() {
   tcaselect(CANAL_TCS_ESQ);
   tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
-  bool vermelhoDir = ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool verdeDirLeitura = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool vermelhoDirLeitura = ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir);
   
-  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
-  bool vermelhoEsq = ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq);
+  bool verdeEsqLeitura = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
+  bool vermelhoEsqLeitura = ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq);
   
+  // ==========================================================================
+  // FILTRO DE ESTABILIDADE (Debouncing / Votação)
+  // ==========================================================================
+  static uint8_t contadorVerdeDir = 0;
+  static uint8_t contadorVerdeEsq = 0;
+  static uint8_t contadorVermelhoDir = 0;
+  static uint8_t contadorVermelhoEsq = 0;
+
+  // Atualizando os contadores DIR
+  if (verdeDirLeitura) contadorVerdeDir++; else contadorVerdeDir = 0;
+  if (vermelhoDirLeitura) contadorVermelhoDir++; else contadorVermelhoDir = 0;
+  
+  // Atualizando os contadores ESQ
+  if (verdeEsqLeitura) contadorVerdeEsq++; else contadorVerdeEsq = 0;
+  if (vermelhoEsqLeitura) contadorVermelhoEsq++; else contadorVermelhoEsq = 0;
+
+  // Validando as leituras (exige 3 leituras consecutivas)
+  bool verdeDir = (contadorVerdeDir >= 3);
+  bool verdeEsq = (contadorVerdeEsq >= 3);
+  bool vermelhoDir = (contadorVermelhoDir >= 3);
+  bool vermelhoEsq = (contadorVermelhoEsq >= 3);
+
   // ==========================================================================
   // DEBUGGER NO MONITOR SERIAL (A cada 300ms para não travar o Arduino)
   // ==========================================================================
@@ -170,7 +200,8 @@ void verificarCores() {
     Serial.print(F(" B:")); Serial.print(bD);
     Serial.print(F(" Hue:")); Serial.print(calcularHue(rD, gD, bD), 1);
     Serial.print(F(" Sat:")); Serial.print(calcularSaturacao(rD, gD, bD), 2);
-    Serial.print(F(" | VERDE? ")); Serial.println(verdeDir ? F("[SIM]") : F("nao"));
+    Serial.print(F(" | VERDE? ")); Serial.print(verdeDirLeitura ? F("[SIM Leitura]") : F("nao"));
+    Serial.print(F(" -> Valido: ")); Serial.println(verdeDir ? F("SIM") : F("NAO"));
     
     // Infos do Sensor Esquerdo
     Serial.print(F("ESQ -> R:")); Serial.print(rE);
@@ -178,11 +209,14 @@ void verificarCores() {
     Serial.print(F(" B:")); Serial.print(bE);
     Serial.print(F(" Hue:")); Serial.print(calcularHue(rE, gE, bE), 1);
     Serial.print(F(" Sat:")); Serial.print(calcularSaturacao(rE, gE, bE), 2);
-    Serial.print(F(" | VERDE? ")); Serial.println(verdeEsq ? F("[SIM]") : F("nao"));
+    Serial.print(F(" | VERDE? ")); Serial.print(verdeEsqLeitura ? F("[SIM Leitura]") : F("nao"));
+    Serial.print(F(" -> Valido: ")); Serial.println(verdeEsq ? F("SIM") : F("NAO"));
   }
   // ==========================================================================
 
   if (vermelhoDir || vermelhoEsq) {
+    contadorVermelhoDir = 0;
+    contadorVermelhoEsq = 0;
     pararMotores();
     estadoAtual = ESTADO_VERMELHO;
     atualizarStatus("COR", "VERMELHO");
@@ -206,6 +240,9 @@ void verificarCores() {
   }
 
   if (detectouVerde) {
+    contadorVerdeDir = 0;
+    contadorVerdeEsq = 0;
+    
     // Avança um pouco para alinhar o eixo de rotação do robô com a interseção antes de girar
     controlarRodas(130, 130); 
     delay(350); // Aumentado para o robô adentrar mais no cruzamento
