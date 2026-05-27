@@ -15,7 +15,7 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {30, 31, 32, 33, 34, 35, 36, 37};
 #define TCA_ADDR 0x70
 
 // Canais do Multiplexador
-#define CANAL_OLED     0
+
 #define CANAL_GY521    1
 #define CANAL_TCS_DIR  2
 #define CANAL_TCS_ESQ  3
@@ -36,6 +36,8 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {30, 31, 32, 33, 34, 35, 36, 37};
 
 #define PINO_TRIG_DIR 52
 #define PINO_ECHO_DIR 53
+
+#define MAX_DISTANCE 60 // Distância máxima para ping (em cm). 60cm ~ 3.5ms de timeout.
 
 // ==============================================================================
 // DEFINIÇÕES DA MÁQUINA DE ESTADOS (FSM)
@@ -69,6 +71,12 @@ enum ModoLinha {
   INSISTINDO,
   GAP_AVANCA,
   GAP_RE_AJUSTE
+};
+
+enum ModoObstaculo {
+  GIRO_INICIAL,
+  CONTORNO_LATERAL,
+  BUSCA_LINHA
 };
 
 #endif // CONFIG_H

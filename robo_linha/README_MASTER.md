@@ -17,7 +17,7 @@
   - **Esquerda:** TRIG - amarelo - 50 | ECHO - laranja - 51
   - **Direita:** TRIG - amarelo - 52 | ECHO - laranja - 53
 - **Comunicação I2C (Multiplexador TCA9548A):**
-  - **Porta 0 (Display OLED):** SDK - roxo - SD0 | SCK - azul - SC0
+
   - **Porta 1 (Giroscópio GY-521):** SDA - roxo - SD1 | SCL - azul - SC1
   - **Porta 2 (Sensor RGB TCS34725 - Direita):** SDA - roxo - SD2 | SCL - azul - SC2
   - **Porta 3 (Sensor RGB TCS34725 - Esquerda):** SDA - roxo - SD3 | SCL - azul - SC3
@@ -41,7 +41,7 @@ O robô opera através de uma Máquina de Estados Finitos:
 ## 🛠️ Bibliotecas Utilizadas
 - `QTRSensors.h` (Pololu)
 - `Adafruit_TCS34725.h` (Cores)
-- `Adafruit_SSD1306.h` (OLED)
+
 - `MPU6050_light.h` ou `Adafruit_MPU6050.h` (Giroscópio)
 
 ### 🟢 Lógica do Verde (Tomada de Decisão)

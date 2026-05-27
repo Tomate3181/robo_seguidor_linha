@@ -1,6 +1,6 @@
 #include <Wire.h>
 #include "config.h"
-#include "display_utils.h"
+
 #include "motores.h"
 #include "sensores.h"
 
@@ -18,6 +18,13 @@ unsigned long tempoInicioGap = 0;
 // Variável para armazenar o tipo de giro determinado pelo sensor RGB
 int tipoGiro = 0;
 float anguloInicial = 0;
+
+// Variáveis de desvio de obstáculo
+ModoObstaculo modoObstaculo = GIRO_INICIAL;
+float anguloInicialObstaculo = 0;
+unsigned long tempoInicioObstaculo = 0;
+int contadorContorno = 0;
+unsigned long tempoUltimoSonar = 0;
 
 
 // ==============================================================================
@@ -54,19 +61,8 @@ void setup() {
   Serial.println(F("   Iniciando Robo Seguidor de Linha    "));
   Serial.println(F("======================================="));
   
-  // Configuração inicial dos Sensores Ultrassônicos
-  pinMode(PINO_TRIG_FRENTE, OUTPUT);
-  pinMode(PINO_ECHO_FRENTE, INPUT);
-  
-  pinMode(PINO_TRIG_ESQ, OUTPUT);
-  pinMode(PINO_ECHO_ESQ, INPUT);
-  
-  pinMode(PINO_TRIG_DIR, OUTPUT);
-  pinMode(PINO_ECHO_DIR, INPUT);
-  
-  // Inicialização do Display OLED
-  initDisplay();
-  atualizarStatus("Sistema", "Iniciado!");
+
+
   
   // Inicialização dos módulos
   initMotores();
@@ -115,6 +111,21 @@ void loop() {
       // Se verificarCores alterou o estado (achou verde/vermelho), saímos do case
       if (estadoAtual != ESTADO_LINHA) {
         break;
+      }
+
+      // Verifica sonar frontal a cada 50ms para não travar o loop
+      if (millis() - tempoUltimoSonar > 50) {
+        tempoUltimoSonar = millis();
+        if (obterDistanciaFiltrada(sonarFrente) <= 15) {
+          controlarRodas(0, 0); // Para imediatamente
+          modoObstaculo = GIRO_INICIAL;
+          tcaselect(CANAL_GY521);
+          mpu.update();
+          anguloInicialObstaculo = mpu.getAngleZ();
+          tempoInicioObstaculo = millis();
+          estadoAtual = ESTADO_OBSTACULO;
+          break;
+        }
       }
 
       // Máquina de estados interna para controle da linha (Não-bloqueante)
@@ -238,7 +249,7 @@ void loop() {
 
         // Volta para a linha
         estadoAtual = ESTADO_LINHA;
-        atualizarStatus("Linha", "Seguindo...");
+
       }
       break;
     }
@@ -248,9 +259,70 @@ void loop() {
       controlarRodas(0, 0);
       break;
 
-    case ESTADO_OBSTACULO:
-      // Lógica de desvio quando o ultrassom detecta um objeto no caminho
+    case ESTADO_OBSTACULO: {
+      switch (modoObstaculo) {
+        case GIRO_INICIAL: {
+          // Gira para a esquerda (convenção: Esquerda é positivo no MPU)
+          controlarRodas(-100, 100); 
+          float anguloAlvo = anguloInicialObstaculo + 90.0;
+          if (mpu.getAngleZ() >= anguloAlvo) {
+            controlarRodas(0, 0);
+            contadorContorno = 0;
+            modoObstaculo = CONTORNO_LATERAL;
+            tempoInicioObstaculo = millis();
+          }
+          // Timeout de segurança
+          if (millis() - tempoInicioObstaculo > 2500) {
+             modoObstaculo = CONTORNO_LATERAL; // Força avanço
+          }
+          break;
+        }
+        case CONTORNO_LATERAL: {
+          controlarRodas(100, 100); // Avança contornando
+          if (millis() - tempoUltimoSonar > 50) {
+            tempoUltimoSonar = millis();
+            int distD = obterDistanciaFiltrada(sonarDir);
+            if (distD > 30) {
+              contadorContorno++;
+              if (contadorContorno >= 3) { // Passou da quina do objeto
+                modoObstaculo = BUSCA_LINHA;
+                tempoInicioObstaculo = millis();
+              }
+            } else {
+              contadorContorno = 0; // Se voltou a ver a parede, zera
+            }
+          }
+          break;
+        }
+        case BUSCA_LINHA: {
+          // Curva reversa para a direita buscando a linha original
+          controlarRodas(120, 20); 
+          
+          uint16_t position = qtr.readLineBlack(sensorValues);
+          bool vendoLinha = false;
+          for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+            if (sensorValues[i] > 200) {
+              vendoLinha = true;
+              break;
+            }
+          }
+
+          if (vendoLinha) {
+            controlarRodas(0, 0);
+            ultimoErro = 0;
+            contadorFalhas = 0;
+            modoLinha = SEGUINDO;
+            estadoAtual = ESTADO_LINHA;
+          } else if (millis() - tempoInicioObstaculo > 6000) { 
+            // Perdeu totalmente a linha, segurança.
+            controlarRodas(0, 0);
+            estadoAtual = ESTADO_LINHA; // Retorna para tentar se achar
+          }
+          break;
+        }
+      }
       break;
+    }
 
     default:
       estadoAtual = ESTADO_LINHA;
