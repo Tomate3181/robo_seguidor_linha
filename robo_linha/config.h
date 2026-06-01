@@ -6,6 +6,11 @@
 // ==============================================================================
 // MAPEAMENTO DE HARDWARE (Arduino Mega 2560)
 // ==============================================================================
+// --- LEDs Indicadores de Calibração ---
+#define LED_FASE_INFRA  22 
+#define LED_FASE_VERDE  24 
+#define LED_FASE_PISTA  26 
+#define LED_FASE_IMU    28
 
 // --- Sensores IR (Barra QRE-8D) ---
 #define NUM_SENSORES_IR 8

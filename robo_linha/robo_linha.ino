@@ -63,6 +63,13 @@ void setup() {
   
   pinMode(PINO_TRIG_DIR, OUTPUT);
   pinMode(PINO_ECHO_DIR, INPUT);
+  /
+  / Pinos de led para calibração 
+
+  pinMode(LED_FASE_INFRA, OUTPUT);
+  pinMode(LED_FASE_VERDE, OUTPUT);
+  pinMode(LED_FASE_PISTA, OUTPUT);
+  pinMode(LED_FASE_IMU, OUTPUT);
   
   // Inicialização do Display OLED
   initDisplay();

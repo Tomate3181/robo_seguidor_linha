@@ -267,6 +267,12 @@ void executarCalibracao() {
   // ==========================================================================
   // FASE 1: LINHA PRETA E FUNDO BRANCO (5 SEGUNDOS)
   // ==========================================================================
+  // ACENDE LED 1 e garante os outros apagados
+  digitalWrite(LED_FASE_INFRA, HIGH);
+  digitalWrite(LED_FASE_VERDE, LOW);
+  digitalWrite(LED_FASE_PISTA, LOW);
+  digitalWrite(LED_FASE_IMU, LOW);
+
   unsigned long tempoInicio = millis();
   int segundosRestantes = 5;
   
@@ -289,6 +295,10 @@ void executarCalibracao() {
   // ==========================================================================
   // FASE 2: CALIBRAÇÃO COM GATILHO DE MAIOR GREEN DOMINANTE (5 SEGUNDOS)
   // ==========================================================================
+  // APAGA LED 1 e ACENDE LED 2
+  digitalWrite(LED_FASE_INFRA, LOW);
+  digitalWrite(LED_FASE_VERDE, HIGH);
+
   tempoInicio = millis();
   segundosRestantes = 5;
   Serial.println(F("[FASE 2] PASSE O SENSOR SOBRE O QUADRADO VERDE..."));
@@ -307,32 +317,22 @@ void executarCalibracao() {
     tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
     tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
     
-    // GATILHO INTELIGENTE DIREITO:
-    // Só atualiza se o 'Green' atual for maior que o recorde anterior E o 'Green' for maior que o Red e Blue (provando que não é o branco da pista)
     if (gD > verdeCalibradoDir.g && gD > rD && gD > bD) {
-      verdeCalibradoDir.r = rD;
-      verdeCalibradoDir.g = gD;
-      verdeCalibradoDir.b = bD;
-      verdeCalibradoDir.c = cD;
+      verdeCalibradoDir.r = rD; verdeCalibradoDir.g = gD; verdeCalibradoDir.b = bD; verdeCalibradoDir.c = cD;
     }
-    
-    // GATILHO INTELIGENTE ESQUERDO:
     if (gE > verdeCalibradoEsq.g && gE > rE && gE > bE) {
-      verdeCalibradoEsq.r = rE;
-      verdeCalibradoEsq.g = gE;
-      verdeCalibradoEsq.b = bE;
-      verdeCalibradoEsq.c = cE;
+      verdeCalibradoEsq.r = rE; verdeCalibradoEsq.g = gE; verdeCalibradoEsq.b = bE; verdeCalibradoEsq.c = cE;
     }
     delay(10);
   }
-  
-  Serial.println(F("\n--- MAPA DA ASSINATURA DO VERDE GRAVADA ---"));
-  Serial.print(F("[DIR] R:")); Serial.print(verdeCalibradoDir.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoDir.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoDir.b);
-  Serial.print(F("[ESQ] R:")); Serial.print(verdeCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoEsq.b);
 
   // ==========================================================================
   // FASE 3: POSICIONAMENTO NA LINHA (5 SEGUNDOS)
   // ==========================================================================
+  // APAGA LED 2 e ACENDE LED 3
+  digitalWrite(LED_FASE_VERDE, LOW);
+  digitalWrite(LED_FASE_PISTA, HIGH);
+
   tempoInicio = millis();
   segundosRestantes = 5;
   Serial.println(F("[FASE 3] COLOQUE O ROBÔ PARADO NA LINHA DE LARGADA..."));
@@ -346,6 +346,37 @@ void executarCalibracao() {
     }
     delay(50);
   }
+
+  // ==========================================================================
+  // FASE 4: REGISTRO ESTÁTICO DO GIROSCÓPIO
+  // ==========================================================================
+  // APAGA LED 3 e ACENDE LED 4
+  digitalWrite(LED_FASE_PISTA, LOW);
+  digitalWrite(LED_FASE_IMU, HIGH);
+
+  atualizarStatus("IMU", "Gravando Zeros...");
+  tcaselect(CANAL_GY521);
+  delay(50);
+  
+  mpu.calcOffsets(true, true);
+  
+  limiarLuminosidadeDir = maxCDir * 0.15;
+  limiarLuminosidadeEsq = maxCEsq * 0.15;
+  if (limiarLuminosidadeDir < 40) limiarLuminosidadeDir = 40;
+  if (limiarLuminosidadeEsq < 40) limiarLuminosidadeEsq = 40;
+  
+  if (verdeCalibradoDir.g == 0) { verdeCalibradoDir.r = 45; verdeCalibradoDir.g = 100; verdeCalibradoDir.b = 50; }
+  if (verdeCalibradoEsq.g == 0) { verdeCalibradoEsq.r = 45; verdeCalibradoEsq.g = 100; verdeCalibradoEsq.b = 50; }
+  
+  // FIM DA CALIBRAÇÃO: APAGA TODOS OS LEDS
+  digitalWrite(LED_FASE_IMU, LOW);
+
+  Serial.println(F("====== [CALIBRAÇÃO CONCLUÍDA COM SUCESSO] ======\n"));
+  atualizarStatus("CALIBRACAO", "PRONTO! CORRE");
+  delay(1000); 
+  
+  estadoAtual = ESTADO_LINHA;
+}
 
   // ==========================================================================
   // FASE 4: REGISTRO ESTÁTICO DO GIROSCÓPIO
