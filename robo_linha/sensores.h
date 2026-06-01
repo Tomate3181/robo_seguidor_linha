@@ -161,7 +161,7 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 }
 
 void verificarCores() {
-  if (millis() - ultimaLeituraCor < 10) return; // Tempo de loop ajustado para 10ms
+  if (millis() - ultimaLeituraCor < 24) return; // Tempo de loop ajustado para 30ms
   ultimaLeituraCor = millis();
   
   uint16_t rD, gD, bD, cD;
@@ -196,8 +196,8 @@ void verificarCores() {
   if (vermelhoEsqLeitura) contadorVermelhoEsq++; else contadorVermelhoEsq = 0;
 
   // Validando as leituras (exige 5 leituras consecutivas para verde, 3 para vermelho)
-  bool verdeDir = (contadorVerdeDir >= 5);
-  bool verdeEsq = (contadorVerdeEsq >= 5);
+  bool verdeDir = (contadorVerdeDir >= 3);
+  bool verdeEsq = (contadorVerdeEsq >= 3);
   bool vermelhoDir = (contadorVermelhoDir >= 3);
   bool vermelhoEsq = (contadorVermelhoEsq >= 3);
 

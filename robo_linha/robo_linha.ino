@@ -76,11 +76,11 @@ void loop() {
   // REGRA DE OURO: Código não-bloqueante. Não utilize delay() no loop principal!
   
   // APLICAÇÃO: Verificação ativa contra travamento físico do barramento I2C
-  // if (Wire.getWireTimeoutFlag()) {
-  //   Serial.println(F("[ALERTA] I2C travou por ruido! Forcando recuperacao..."));
-  //   Wire.clearWireTimeoutFlag(); // Destrava limpando o erro interno
-  //   tcaselect(CANAL_GY521);      // Força o reestabelecimento do canal do giroscópio no TCA
-  // }
+  if (Wire.getWireTimeoutFlag()) {
+    Serial.println(F("[ALERTA] I2C travou por ruido! Forcando recuperacao..."));
+    Wire.clearWireTimeoutFlag(); // Destrava limpando o erro interno
+    tcaselect(CANAL_GY521);      // Força o reestabelecimento do canal do giroscópio no TCA
+  }
   
   // Atualiza o giroscópio a cada ciclo para o rastreio do Yaw(Z) não perder precisão
   tcaselect(CANAL_GY521);
@@ -99,7 +99,7 @@ void loop() {
       // Varre TODOS os 8 sensores procurando qualquer indício de preto (> 200)
       bool vendoLinha = false;
       for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-        if (sensorValues[i] > 200) {
+        if (sensorValues[i] > 500) {
           vendoLinha = true;
           break;
         }
@@ -116,7 +116,7 @@ void loop() {
       // Verifica sonar frontal a cada 50ms para não travar o loop
       if (millis() - tempoUltimoSonar > 50) {
         tempoUltimoSonar = millis();
-        if (obterDistanciaFiltrada(sonarFrente) <= 15) {
+        if (obterDistanciaFiltrada(sonarFrente) <= 10) {
           controlarRodas(0, 0); // Para imediatamente
           modoObstaculo = GIRO_INICIAL;
           tcaselect(CANAL_GY521);
