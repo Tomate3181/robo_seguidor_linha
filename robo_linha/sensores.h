@@ -4,8 +4,9 @@
 #include <QTRSensors.h>
 #include <Adafruit_TCS34725.h>
 #include <MPU6050_light.h>
+#include <NewPing.h>
 #include "config.h"
-#include "display_utils.h"
+
 #include "motores.h"
 
 // Assinatura do multiplexador (definido em robo_linha.ino)
@@ -21,6 +22,11 @@ Adafruit_TCS34725 tcsEsq = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS3
 
 // Objeto do Giroscópio
 MPU6050 mpu(Wire);
+
+// Objetos Ultrassônicos
+NewPing sonarFrente(PINO_TRIG_FRENTE, PINO_ECHO_FRENTE, MAX_DISTANCE);
+NewPing sonarEsq(PINO_TRIG_ESQ, PINO_ECHO_ESQ, MAX_DISTANCE);
+NewPing sonarDir(PINO_TRIG_DIR, PINO_ECHO_DIR, MAX_DISTANCE);
 
 // Variável para controle não-bloqueante de leitura de cor
 unsigned long ultimaLeituraCor = 0;
@@ -70,6 +76,15 @@ void initSensores() {
   } else {
     Serial.println(F("MPU Encontrado. Pronto para calibracao de pista."));
   }
+}
+
+// ==============================================================================
+// LÓGICA DE VALIDAÇÃO DE ULTRASSOM
+// ==============================================================================
+
+int obterDistanciaFiltrada(NewPing &sonar) {
+  int d = sonar.ping_cm();
+  return (d == 0) ? MAX_DISTANCE : d;
 }
 
 // ==============================================================================
@@ -146,7 +161,7 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 }
 
 void verificarCores() {
-  if (millis() - ultimaLeituraCor < 10) return; // Tempo de loop ajustado para 10ms
+  if (millis() - ultimaLeituraCor < 24) return; // Tempo de loop ajustado para 30ms
   ultimaLeituraCor = millis();
   
   uint16_t rD, gD, bD, cD;
@@ -180,7 +195,7 @@ void verificarCores() {
   if (verdeEsqLeitura) contadorVerdeEsq++; else contadorVerdeEsq = 0;
   if (vermelhoEsqLeitura) contadorVermelhoEsq++; else contadorVermelhoEsq = 0;
 
-  // Validando as leituras (exige 3 leituras consecutivas)
+  // Validando as leituras (exige 5 leituras consecutivas para verde, 3 para vermelho)
   bool verdeDir = (contadorVerdeDir >= 3);
   bool verdeEsq = (contadorVerdeEsq >= 3);
   bool vermelhoDir = (contadorVermelhoDir >= 3);
@@ -219,7 +234,7 @@ void verificarCores() {
     contadorVermelhoEsq = 0;
     pararMotores();
     estadoAtual = ESTADO_VERMELHO;
-    atualizarStatus("COR", "VERMELHO");
+
     return;
   }
   
@@ -227,15 +242,15 @@ void verificarCores() {
 
   if (verdeDir && verdeEsq) {
     tipoGiro = 180;
-    atualizarStatus("VERDE DUPLO", "Alinhando 180");
+
     detectouVerde = true;
   } else if (verdeDir) {
     tipoGiro = 90;
-    atualizarStatus("VERDE DIR", "Alinhando 90");
+
     detectouVerde = true;
   } else if (verdeEsq) {
     tipoGiro = -90;
-    atualizarStatus("VERDE ESQ", "Alinhando -90");
+
     detectouVerde = true;
   }
 
@@ -275,7 +290,7 @@ void executarCalibracao() {
     if (5 - tempoPassado != segundosRestantes) {
       segundosRestantes = 5 - tempoPassado;
       String msgTempo = "Fundo/Linha: " + String(segundosRestantes) + "s";
-      atualizarStatus("Fase 1/3", msgTempo.c_str());
+
     }
     
     qtr.calibrate();
@@ -298,7 +313,7 @@ void executarCalibracao() {
     if (5 - tempoPassado != segundosRestantes) {
       segundosRestantes = 5 - tempoPassado;
       String msgTempo = "Passe no VERDE: " + String(segundosRestantes) + "s";
-      atualizarStatus("Fase 2/3", msgTempo.c_str());
+
     }
     
     uint16_t rD, gD, bD, cD;
@@ -342,7 +357,7 @@ void executarCalibracao() {
     if (5 - tempoPassado != segundosRestantes) {
       segundosRestantes = 5 - tempoPassado;
       String msgTempo = "Alinhe na pista: " + String(segundosRestantes) + "s";
-      atualizarStatus("Fase 3/3", msgTempo.c_str());
+
     }
     delay(50);
   }
@@ -350,7 +365,7 @@ void executarCalibracao() {
   // ==========================================================================
   // FASE 4: REGISTRO ESTÁTICO DO GIROSCÓPIO
   // ==========================================================================
-  atualizarStatus("IMU", "Gravando Zeros...");
+
   tcaselect(CANAL_GY521);
   delay(50);
   
@@ -366,7 +381,7 @@ void executarCalibracao() {
   if (verdeCalibradoEsq.g == 0) { verdeCalibradoEsq.r = 45; verdeCalibradoEsq.g = 100; verdeCalibradoEsq.b = 50; }
   
   Serial.println(F("====== [CALIBRAÇÃO CONCLUÍDA COM SUCESSO] ======\n"));
-  atualizarStatus("CALIBRACAO", "PRONTO! CORRE");
+
   delay(1000); 
   
   estadoAtual = ESTADO_LINHA;

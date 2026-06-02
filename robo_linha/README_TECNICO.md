@@ -35,7 +35,7 @@ Após analisar todos os arquivos criados e refatorados, nossa Arquitetura Não-B
    - **Solução de Ouro:** Baixe e utilize a biblioteca **`NewPing`**. Ela permite ler o ECHO por temporizadores/interrupções (ping timer), o que vai manter a rodagem lisa enquanto os sensores olham pros lados em background.
 
 2. **Limpeza e Estabilidade do I2C:**
-   - Estamos usando O MPU6050, dois TCS34725 e um OLED pendurados no TCA9548A. Quanto mais cabos voando, maior a capacitância parasita e o ruído, podendo travar o canal I2C (`Wire`).
+   - Estamos usando O MPU6050 e dois TCS34725 pendurados no TCA9548A. Quanto mais cabos voando, maior a capacitância parasita e o ruído, podendo travar o canal I2C (`Wire`).
    - Mantenha esses fios curtinhos e evite passar cabos de I2C encostados nos fios de força dos motores.
 
 3. **Evoluindo a Velocidade e o PID:**
