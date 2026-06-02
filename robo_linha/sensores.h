@@ -88,17 +88,31 @@ int obterDistanciaFiltrada(NewPing &sonar) {
 }
 
 // ==============================================================================
+// FUNÇÃO AUXILIAR DO BOTÃO
+// ==============================================================================
+void esperarBotao() {
+  // Espera o botão ser pressionado (HIGH -> LOW)
+  while (digitalRead(PINO_BOTAO) == HIGH) {
+    delay(10);
+  }
+  delay(50); // Debounce (filtro de ruído mecânico)
+  
+  // Espera o botão ser solto (LOW -> HIGH)
+  while (digitalRead(PINO_BOTAO) == LOW) {
+    delay(10);
+  }
+  delay(50); // Debounce
+}
+
+// ==============================================================================
 // LÓGICA DE VALIDAÇÃO DE CORES
 // ==============================================================================
 
 bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
   if (c < limiarC) return false;  
   if (r < 80) return false; 
-
   float margem = 1.35; 
-  if (r > (g * margem) && r > (b * margem)) {
-    return true; 
-  }
+  if (r > (g * margem) && r > (b * margem)) return true; 
   return false;
 }
 
@@ -109,13 +123,9 @@ float calcularHue(float r, float g, float b) {
   if (delta == 0) return 0;
   
   float hue = 0;
-  if (maxVal == r) {
-    hue = 60.0 * ((g - b) / delta);
-  } else if (maxVal == g) {
-    hue = 60.0 * ((b - r) / delta + 2.0);
-  } else if (maxVal == b) {
-    hue = 60.0 * ((r - g) / delta + 4.0);
-  }
+  if (maxVal == r) hue = 60.0 * ((g - b) / delta);
+  else if (maxVal == g) hue = 60.0 * ((b - r) / delta + 2.0);
+  else if (maxVal == b) hue = 60.0 * ((r - g) / delta + 4.0);
   if (hue < 0) hue += 360.0;
   return hue;
 }
@@ -127,140 +137,109 @@ float calcularSaturacao(float r, float g, float b) {
   return (maxVal - minVal) / maxVal;
 }
 
+// ==============================================================================
+// LÓGICA DE VALIDAÇÃO DE CORES SUPER RIGOROSA (Sem falso positivo)
+// ==============================================================================
 bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
-  // Filtro de Ruído: Se C < limiar_minimo, ignorar leitura (luz insuficiente/fora da pista).
+  // Ignora escuro total ou sombras
   if (c < limiarC) return false;
   
-  // Filtro absoluto de ruído do sensor (valores muito baixos são lixo)
-  if (g < 50) return false;
-  if (c > 60000) return false;
+  // Ignora lixo do sensor
+  if (g < 50 || c > 60000) return false;
   
+  // REGRA DE OURO: No verde real, o 'G' TEM que ser a cor dominante. 
+  // Se R ou B forem maiores ou iguais ao G, não é verde (provavelmente é branco ou cinza)
+  if (r >= g || b >= g) return false;
+  
+  // O Verde tem que ser pelo menos 15% mais forte que o vermelho e o azul
+  if (g < (r * 1.15)) return false;
+  if (g < (b * 1.15)) return false;
+
   float hue = calcularHue(r, g, b);
   float sat = calcularSaturacao(r, g, b);
 
-  // Range Hue Verde: [95.0 - 165.0]
-  bool hueValido = (hue >= 95.0 && hue <= 165.0);
+  // Range de Verde restrito
+  bool hueValido = (hue >= 90.0 && hue <= 170.0);
+  
+  // Aumentamos a saturação para 0.25 (O antigo 0.18 deixava o chão branco ser lido como verde)
+  bool satValida = (sat >= 0.25); 
 
-  // CONDIÇÃO 1: Verde Inegável (Fita Escura centralizada no sensor)
-  // Saturação Mínima: 0.35 (Fita central)
-  bool verdeForte = (hueValido && sat >= 0.35 && g > (r * 1.25) && g > (b * 1.25));
-
-  if (verdeForte) {
+  if (hueValido && satValida) {
     return true;
   }
-
-  // CONDIÇÃO 2: Verde de Borda (Metade fita, metade chão branco)
-  // Saturação Mínima: 0.18 (Borda)
-  bool verdeBorda = (hueValido && sat >= 0.18 && g > (r * 1.10) && g > (b * 1.10));
-
-  if (verdeBorda) {
-    return true;
-  }
-
+  
   return false;
 }
 
-void verificarCores() {
-  if (millis() - ultimaLeituraCor < 24) return; // Tempo de loop ajustado para 30ms
-  ultimaLeituraCor = millis();
-  
-  uint16_t rD, gD, bD, cD;
-  uint16_t rE, gE, bE, cE;
-  
-  tcaselect(CANAL_TCS_DIR);
-  tcsDir.getRawData(&rD, &gD, &bD, &cD);
-  
-  tcaselect(CANAL_TCS_ESQ);
-  tcsEsq.getRawData(&rE, &gE, &bE, &cE);
-  
-  bool verdeDirLeitura = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
-  bool vermelhoDirLeitura = ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir);
-  
-  bool verdeEsqLeitura = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
-  bool vermelhoEsqLeitura = ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq);
-  
-  // ==========================================================================
-  // FILTRO DE ESTABILIDADE (Debouncing / Votação)
-  // ==========================================================================
-  static uint8_t contadorVerdeDir = 0;
-  static uint8_t contadorVerdeEsq = 0;
-  static uint8_t contadorVermelhoDir = 0;
-  static uint8_t contadorVermelhoEsq = 0;
 
-  // Atualizando os contadores DIR
-  if (verdeDirLeitura) contadorVerdeDir++; else contadorVerdeDir = 0;
-  if (vermelhoDirLeitura) contadorVermelhoDir++; else contadorVermelhoDir = 0;
+// ==============================================================================
+// NOVA LEITURA DE COR (Varredura Contínua e Retorno de Segurança)
+// ==============================================================================
+bool avaliarInterseccao() {
+  unsigned long tempoInicio = millis();
   
-  // Atualizando os contadores ESQ
-  if (verdeEsqLeitura) contadorVerdeEsq++; else contadorVerdeEsq = 0;
-  if (vermelhoEsqLeitura) contadorVermelhoEsq++; else contadorVermelhoEsq = 0;
-
-  // Validando as leituras (exige 5 leituras consecutivas para verde, 3 para vermelho)
-  bool verdeDir = (contadorVerdeDir >= 3);
-  bool verdeEsq = (contadorVerdeEsq >= 3);
-  bool vermelhoDir = (contadorVermelhoDir >= 3);
-  bool vermelhoEsq = (contadorVermelhoEsq >= 3);
-
-  // ==========================================================================
-  // DEBUGGER NO MONITOR SERIAL (A cada 300ms para não travar o Arduino)
-  // ==========================================================================
-  static unsigned long tempoUltimoPrint = 0;
-  if (millis() - tempoUltimoPrint > 300) {
-    tempoUltimoPrint = millis();
+  int votosVerdeDir = 0;
+  int votosVerdeEsq = 0;
+  int votosVermelho = 0;
+  
+  bool achouVerde = false;
+  bool achouVermelho = false;
+  
+  // 1. Avança devagar para "varrer" o chão à frente
+  controlarRodas(80, 80);
+  
+  // 2. Fica filmando o chão por 250ms (Tempo suficiente pro sensor passar sobre toda a fita)
+  while (millis() - tempoInicio < 250) { 
+    uint16_t rD, gD, bD, cD;
+    uint16_t rE, gE, bE, cE;
     
-    Serial.println(F("\n--- [DEBUGGER TCS34725] ---"));
-    // Infos do Sensor Direito
-    Serial.print(F("DIR -> R:")); Serial.print(rD);
-    Serial.print(F(" G:")); Serial.print(gD);
-    Serial.print(F(" B:")); Serial.print(bD);
-    Serial.print(F(" Hue:")); Serial.print(calcularHue(rD, gD, bD), 1);
-    Serial.print(F(" Sat:")); Serial.print(calcularSaturacao(rD, gD, bD), 2);
-    Serial.print(F(" | VERDE? ")); Serial.print(verdeDirLeitura ? F("[SIM Leitura]") : F("nao"));
-    Serial.print(F(" -> Valido: ")); Serial.println(verdeDir ? F("SIM") : F("NAO"));
+    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
     
-    // Infos do Sensor Esquerdo
-    Serial.print(F("ESQ -> R:")); Serial.print(rE);
-    Serial.print(F(" G:")); Serial.print(gE);
-    Serial.print(F(" B:")); Serial.print(bE);
-    Serial.print(F(" Hue:")); Serial.print(calcularHue(rE, gE, bE), 1);
-    Serial.print(F(" Sat:")); Serial.print(calcularSaturacao(rE, gE, bE), 2);
-    Serial.print(F(" | VERDE? ")); Serial.print(verdeEsqLeitura ? F("[SIM Leitura]") : F("nao"));
-    Serial.print(F(" -> Valido: ")); Serial.println(verdeEsq ? F("SIM") : F("NAO"));
+    // Verifica Lado Direito
+    if (ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir)) votosVerdeDir++;
+    else votosVerdeDir = 0; // Se piscar outra cor, zera. Exige leitura CONSECUTIVA!
+    
+    // Verifica Lado Esquerdo
+    if (ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq)) votosVerdeEsq++;
+    else votosVerdeEsq = 0;
+    
+    // Verifica Vermelho
+    if (ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir) || ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq)) votosVermelho++;
+    else votosVermelho = 0;
+    
+    // Se achou a cor 2 VEZES SEGUIDAS, confirmamos a detecção imediatamente!
+    if (votosVerdeDir >= 2 || votosVerdeEsq >= 2) {
+      achouVerde = true;
+      break; 
+    }
+    if (votosVermelho >= 2) {
+      achouVermelho = true;
+      break;
+    }
   }
-  // ==========================================================================
-
-  if (vermelhoDir || vermelhoEsq) {
-    contadorVermelhoDir = 0;
-    contadorVermelhoEsq = 0;
-    pararMotores();
+  
+  pararMotores(); // Acabou a varredura
+  
+  // --- DECISÕES DA VARREDURA ---
+  
+  if (achouVermelho) {
     estadoAtual = ESTADO_VERMELHO;
-
-    return;
+    return true;
   }
   
-  bool detectouVerde = false;
-
-  if (verdeDir && verdeEsq) {
-    tipoGiro = 180;
-
-    detectouVerde = true;
-  } else if (verdeDir) {
-    tipoGiro = 90;
-
-    detectouVerde = true;
-  } else if (verdeEsq) {
-    tipoGiro = -90;
-
-    detectouVerde = true;
-  }
-
-  if (detectouVerde) {
-    contadorVerdeDir = 0;
-    contadorVerdeEsq = 0;
+  if (achouVerde) {
+    if (votosVerdeDir >= 2 && votosVerdeEsq >= 2) {
+      tipoGiro = 180;
+    } else if (votosVerdeDir >= 2) {
+      tipoGiro = 90;
+    } else if (votosVerdeEsq >= 2) {
+      tipoGiro = -90;
+    }
     
-    // Avança um pouco para alinhar o eixo de rotação do robô com a interseção antes de girar
-    controlarRodas(130, 130); 
-    delay(350); // Aumentado para o robô adentrar mais no cruzamento
+    // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
+    controlarRodas(100, 100); 
+    delay(100); 
     pararMotores();
     delay(50); 
 
@@ -269,30 +248,40 @@ void verificarCores() {
     anguloInicial = mpu.getAngleZ(); 
     
     estadoAtual = ESTADO_VERDE; 
+    return true; 
   }
+
+  // ===== O MOONWALK (RÉ DE SEGURANÇA) =====
+  // Se chegou aqui, a varredura durou os 250ms completos e não viu NADA verde.
+  // Isso significa que era apenas uma curva de 90 graus preta!
+  // Como andamos pra frente e perdemos a quina, damos ré pela mesma quantidade de tempo
+  // para devolver os sensores infravermelhos exatamente em cima da curva!
+  controlarRodas(-80, -80);
+  delay(250); 
+  pararMotores();
+  
+  // Retorna falso para a FSM do loop voltar a caçar a linha com o PID (que agora verá a curva de 90!)
+  return false; 
 }
 
+
+// ==============================================================================
+// NOVA CALIBRAÇÃO MANUAL VIA BOTÃO
+// ==============================================================================
 void executarCalibracao() {
   pararMotores(); 
-  Serial.println(F("\n====== [CALIBRAÇÃO MANUAL EXPANDIDA] ======"));
+  Serial.println(F("\n====== [CALIBRAÇÃO MANUAL COM BOTÃO] ======"));
   
   uint16_t maxCDir = 0;
   uint16_t maxCEsq = 0;
   
-  // ==========================================================================
-  // FASE 1: LINHA PRETA E FUNDO BRANCO (5 SEGUNDOS)
-  // ==========================================================================
-  unsigned long tempoInicio = millis();
-  int segundosRestantes = 5;
+  // ---------------------------------------------------------
+  // FASE 1: LINHA PRETA E FUNDO BRANCO
+  // ---------------------------------------------------------
+  Serial.println(F("[FASE 1] Mova a frente do robô sobre a linha e o fundo branco."));
+  Serial.println(F("Quando terminar, APERTE O BOTÃO."));
   
-  while (millis() - tempoInicio < 5000) {
-    int tempoPassado = (millis() - tempoInicio) / 1000;
-    if (5 - tempoPassado != segundosRestantes) {
-      segundosRestantes = 5 - tempoPassado;
-      String msgTempo = "Fundo/Linha: " + String(segundosRestantes) + "s";
-
-    }
-    
+  while (digitalRead(PINO_BOTAO) == HIGH) { // Enquanto não apertar...
     qtr.calibrate();
     
     uint16_t r, g, b, c;
@@ -300,91 +289,59 @@ void executarCalibracao() {
     tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&r, &g, &b, &c); if (c > maxCEsq) maxCEsq = c;
     delay(10);
   }
+  esperarBotao(); // Aguarda você soltar o botão e faz o filtro mecânico
+  Serial.println(F("-> IR Calibrado!"));
 
-  // ==========================================================================
-  // FASE 2: CALIBRAÇÃO COM GATILHO DE MAIOR GREEN DOMINANTE (5 SEGUNDOS)
-  // ==========================================================================
-  tempoInicio = millis();
-  segundosRestantes = 5;
-  Serial.println(F("[FASE 2] PASSE O SENSOR SOBRE O QUADRADO VERDE..."));
+  // ---------------------------------------------------------
+  // FASE 2: GATILHO DO VERDE
+  // ---------------------------------------------------------
+  Serial.println(F("\n[FASE 2] Coloque os DOIS sensores RGB sobre a fita VERDE."));
+  Serial.println(F("Mexa um pouquinho para ele pegar a cor, e APERTE O BOTÃO."));
   
-  while (millis() - tempoInicio < 5000) {
-    int tempoPassado = (millis() - tempoInicio) / 1000;
-    if (5 - tempoPassado != segundosRestantes) {
-      segundosRestantes = 5 - tempoPassado;
-      String msgTempo = "Passe no VERDE: " + String(segundosRestantes) + "s";
-
-    }
-    
+  while (digitalRead(PINO_BOTAO) == HIGH) {
     uint16_t rD, gD, bD, cD;
     uint16_t rE, gE, bE, cE;
     
     tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
     tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
     
-    // GATILHO INTELIGENTE DIREITO:
-    // Só atualiza se o 'Green' atual for maior que o recorde anterior E o 'Green' for maior que o Red e Blue (provando que não é o branco da pista)
     if (gD > verdeCalibradoDir.g && gD > rD && gD > bD) {
-      verdeCalibradoDir.r = rD;
-      verdeCalibradoDir.g = gD;
-      verdeCalibradoDir.b = bD;
-      verdeCalibradoDir.c = cD;
+      verdeCalibradoDir.r = rD; verdeCalibradoDir.g = gD; verdeCalibradoDir.b = bD; verdeCalibradoDir.c = cD;
     }
-    
-    // GATILHO INTELIGENTE ESQUERDO:
     if (gE > verdeCalibradoEsq.g && gE > rE && gE > bE) {
-      verdeCalibradoEsq.r = rE;
-      verdeCalibradoEsq.g = gE;
-      verdeCalibradoEsq.b = bE;
-      verdeCalibradoEsq.c = cE;
+      verdeCalibradoEsq.r = rE; verdeCalibradoEsq.g = gE; verdeCalibradoEsq.b = bE; verdeCalibradoEsq.c = cE;
     }
     delay(10);
   }
+  esperarBotao();
   
-  Serial.println(F("\n--- MAPA DA ASSINATURA DO VERDE GRAVADA ---"));
+  Serial.println(F("--- MAPA DA ASSINATURA DO VERDE GRAVADA ---"));
   Serial.print(F("[DIR] R:")); Serial.print(verdeCalibradoDir.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoDir.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoDir.b);
   Serial.print(F("[ESQ] R:")); Serial.print(verdeCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoEsq.b);
 
-  // ==========================================================================
-  // FASE 3: POSICIONAMENTO NA LINHA (5 SEGUNDOS)
-  // ==========================================================================
-  tempoInicio = millis();
-  segundosRestantes = 5;
-  Serial.println(F("[FASE 3] COLOQUE O ROBÔ PARADO NA LINHA DE LARGADA..."));
+  // ---------------------------------------------------------
+  // FASE 3: POSICIONAMENTO FINAL
+  // ---------------------------------------------------------
+  Serial.println(F("\n[FASE 3] Posicione o robô na LARGADA."));
+  Serial.println(F("Não toque no robô! APERTE O BOTÃO e afaste a mão para calibrar o Giroscópio."));
+  esperarBotao();
   
-  while (millis() - tempoInicio < 5000) {
-    int tempoPassado = (millis() - tempoInicio) / 1000;
-    if (5 - tempoPassado != segundosRestantes) {
-      segundosRestantes = 5 - tempoPassado;
-      String msgTempo = "Alinhe na pista: " + String(segundosRestantes) + "s";
-
-    }
-    delay(50);
-  }
-
-  // ==========================================================================
-  // FASE 4: REGISTRO ESTÁTICO DO GIROSCÓPIO
-  // ==========================================================================
-
+  Serial.println(F("Calibrando MPU6050 (NAO MEXA)..."));
   tcaselect(CANAL_GY521);
-  delay(50);
-  
+  delay(100);
   mpu.calcOffsets(true, true);
   
-  limiarLuminosidadeDir = maxCDir * 0.15; // Reduzido para não ignorar o verde escuro
+  limiarLuminosidadeDir = maxCDir * 0.15; 
   limiarLuminosidadeEsq = maxCEsq * 0.15;
-  if (limiarLuminosidadeDir < 40) limiarLuminosidadeDir = 40; // Piso menor para fitas que refletem pouca luz
+  if (limiarLuminosidadeDir < 40) limiarLuminosidadeDir = 40; 
   if (limiarLuminosidadeEsq < 40) limiarLuminosidadeEsq = 40;
   
-  // Casos de erro/segurança (se você não passar no verde na calibração por engano)
   if (verdeCalibradoDir.g == 0) { verdeCalibradoDir.r = 45; verdeCalibradoDir.g = 100; verdeCalibradoDir.b = 50; }
   if (verdeCalibradoEsq.g == 0) { verdeCalibradoEsq.r = 45; verdeCalibradoEsq.g = 100; verdeCalibradoEsq.b = 50; }
   
-  Serial.println(F("====== [CALIBRAÇÃO CONCLUÍDA COM SUCESSO] ======\n"));
-
+  Serial.println(F("\n====== [CALIBRAÇÃO CONCLUÍDA! LARGANDO...] ======\n"));
   delay(1000); 
   
   estadoAtual = ESTADO_LINHA;
 }
-
 #endif // SENSORES_H

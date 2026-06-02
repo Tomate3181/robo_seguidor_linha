@@ -50,6 +50,8 @@ void setup() {
   
   Serial.begin(115200);
   
+  pinMode(PINO_BOTAO, INPUT_PULLUP); // Habilita o resistor interno do Arduino para o botão
+  
   // Inicializa o barramento I2C
   Wire.begin(); 
   
@@ -98,20 +100,33 @@ void loop() {
       
       // Varre TODOS os 8 sensores procurando qualquer indício de preto (> 200)
       bool vendoLinha = false;
+      int sensoresNoPreto = 0;
+
       for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
         if (sensorValues[i] > 500) {
           vendoLinha = true;
-          break;
+          sensoresNoPreto++;
         }
       }
 
-      // Verifica as cores a cada 50ms para intersecções/obstáculos
-      verificarCores();
-
-      // Se verificarCores alterou o estado (achou verde/vermelho), saímos do case
-      if (estadoAtual != ESTADO_LINHA) {
-        break;
+      // =====================================================================
+      // GATILHO INTELIGENTE: LEITURA DE COR SOB DEMANDA
+      // Se 4 ou mais sensores detectam preto, assumimos que é uma linha horizontal (Cruzamento ou T)
+      // O temporizador evita que ele leia o mesmo cruzamento várias vezes seguidas
+      // =====================================================================
+      static unsigned long tempoUltimoCruzamento = 0;
+      if (sensoresNoPreto >= 4 && (millis() - tempoUltimoCruzamento > 1500)) {
+        tempoUltimoCruzamento = millis();
+        
+        bool mudouEstado = avaliarInterseccao(); // A mágica acontece aqui
+        
+        // Se a função detectou verde ou vermelho, ela já alterou o estadoAtual.
+        if (mudouEstado) {
+          break; // Sai do case ESTADO_LINHA e vai processar a cor no loop
+        }
       }
+      // =====================================================================
+
 
       // Verifica sonar frontal a cada 50ms para não travar o loop
       if (millis() - tempoUltimoSonar > 50) {
