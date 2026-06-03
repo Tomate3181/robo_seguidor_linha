@@ -173,6 +173,33 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 
 
 // ==============================================================================
+// DETECÇÃO DE SILVER TAPE (ENTRADA DO RESGATE)
+// ==============================================================================
+// A fita cinza/prata cobre a barra de sensores inteira na entrada da zona de resgate.
+// Quando o robô passa sobre ela, todos os 8 sensores IR lêem valores semelhantes
+// (baixa variabilidade) e na faixa mediana/cinza (entre 150 e 700).
+bool detectouSilverTape(uint16_t *valores) {
+  uint16_t menorValor = 1000;
+  uint16_t maiorValor = 0;
+  uint32_t somaValores = 0;
+  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+    if (valores[i] < menorValor) menorValor = valores[i];
+    if (valores[i] > maiorValor) maiorValor = valores[i];
+    somaValores += valores[i];
+  }
+  
+  uint16_t mediaValores = somaValores / NUM_SENSORES_IR;
+  uint16_t amplitude = maiorValor - menorValor;
+  
+  // Condição de fita cinza: média na faixa intermediária e variação homogênea entre canais
+  if (mediaValores >= 150 && mediaValores <= 700 && amplitude < 250) {
+    return true;
+  }
+  return false;
+}
+
+
+// ==============================================================================
 // NOVA LEITURA DE COR (Varredura Contínua e Retorno de Segurança)
 // ==============================================================================
 bool avaliarInterseccao() {
@@ -232,9 +259,9 @@ bool avaliarInterseccao() {
     if (votosVerdeDir >= 2 && votosVerdeEsq >= 2) {
       tipoGiro = 180;
     } else if (votosVerdeDir >= 2) {
-      tipoGiro = 90;
+      tipoGiro = 70;
     } else if (votosVerdeEsq >= 2) {
-      tipoGiro = -90;
+      tipoGiro = -70;
     }
     
     // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
