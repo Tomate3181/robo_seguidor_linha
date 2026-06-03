@@ -112,6 +112,9 @@ void loop() {
         // Clique rápido = Carregar
         carregarCalibracaoEEPROM();
       }
+      // CORREÇÃO: Sincroniza o estado do botão após sair do loop bloqueante
+      botaoAtual = HIGH;
+      botaoAnterior = HIGH;
     }
   } 
   else if (estadoAtual != ESTADO_CALIBRACAO) {
@@ -390,6 +393,10 @@ void loop() {
       }
       break;
     }
+
+    case ESTADO_PAUSADO:
+      pararMotores(); // Mantém os motores parados durante a pausa
+      break;
 
     default:
       estadoAtual = ESTADO_LINHA;

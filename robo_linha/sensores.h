@@ -140,7 +140,7 @@ float calcularSaturacao(float r, float g, float b) {
 // ==============================================================================
 // LÓGICA DE VALIDAÇÃO DE CORES SUPER RIGOROSA (Sem falso positivo)
 // ==============================================================================
-bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
+bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC, const AssinaturaCor &calibrado) {
   // Ignora escuro total ou sombras
   if (c < limiarC) return false;
   
@@ -158,17 +158,26 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
   float hue = calcularHue(r, g, b);
   float sat = calcularSaturacao(r, g, b);
 
-  // Range de Verde restrito
-  bool hueValido = (hue >= 90.0 && hue <= 170.0);
-  
-  // Aumentamos a saturação para 0.25 (O antigo 0.18 deixava o chão branco ser lido como verde)
-  bool satValida = (sat >= 0.25); 
+  // Define os valores alvo baseados na calibração (ou fallback padrão se não calibrado)
+  float hueAlvo = 120.0;
+  float satMinima = 0.25;
 
-  if (hueValido && satValida) {
-    return true;
+  if (calibrado.g > 0) {
+    hueAlvo = calcularHue(calibrado.r, calibrado.g, calibrado.b);
+    satMinima = calcularSaturacao(calibrado.r, calibrado.g, calibrado.b) * 0.70; // 70% da saturação calibrada
+    if (satMinima < 0.20) satMinima = 0.20; // Limite mínimo de segurança
   }
-  
-  return false;
+
+  // Verifica se o Hue lido está próximo do Hue alvo (tolerância de +-35 graus)
+  float diferencaHue = abs(hue - hueAlvo);
+  if (diferencaHue > 180.0) {
+    diferencaHue = 360.0 - diferencaHue; // Tratamento de circularidade de cor
+  }
+
+  bool hueValido = (diferencaHue <= 35.0); 
+  bool satValida = (sat >= satMinima); 
+
+  return hueValido && satValida;
 }
 
 
@@ -197,11 +206,11 @@ bool avaliarInterseccao() {
     tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
     
     // Verifica Lado Direito
-    if (ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir)) votosVerdeDir++;
+    if (ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir, verdeCalibradoDir)) votosVerdeDir++;
     else votosVerdeDir = 0; // Se piscar outra cor, zera. Exige leitura CONSECUTIVA!
     
     // Verifica Lado Esquerdo
-    if (ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq)) votosVerdeEsq++;
+    if (ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq, verdeCalibradoEsq)) votosVerdeEsq++;
     else votosVerdeEsq = 0;
     
     // Verifica Vermelho
@@ -285,8 +294,8 @@ void salvarCalibracaoEEPROM() {
     EEPROM.put(addr, qtr.calibrationOn.maximum[i]); addr += sizeof(uint16_t);
   }
   
-  // Marca registrada: o número "123" no endereço 0 significa que existe uma calibração válida salva.
-  EEPROM.write(0, 123); 
+  // Marca registrada usando update para economizar ciclos de gravação
+  EEPROM.update(0, 123); 
   Serial.println(F("Salvo com sucesso!"));
 }
 
@@ -336,6 +345,10 @@ void carregarCalibracaoEEPROM() {
 void executarCalibracao() {
   pararMotores(); 
   Serial.println(F("\n====== [CALIBRAÇÃO MANUAL COM BOTÃO] ======"));
+  
+  // CORREÇÃO: Reseta as assinaturas antigas para permitir nova calibração (evita travamento com valores altos)
+  verdeCalibradoDir = {0, 0, 0, 0};
+  verdeCalibradoEsq = {0, 0, 0, 0};
   
   uint16_t maxCDir = 0;
   uint16_t maxCEsq = 0;
