@@ -191,8 +191,10 @@ bool detectouSilverTape(uint16_t *valores) {
   uint16_t mediaValores = somaValores / NUM_SENSORES_IR;
   uint16_t amplitude = maiorValor - menorValor;
   
-  // Condição de fita cinza: média na faixa intermediária e variação homogênea entre canais
-  if (mediaValores >= 150 && mediaValores <= 700 && amplitude < 250) {
+  // Condição de fita cinza refinada para evitar falso-positivo em fundo branco ou linhas pretas:
+  // - Média na faixa intermediária bem definida (280 a 750)
+  // - Amplitude muito pequena (homogeneidade completa cobrindo a barra)
+  if (mediaValores >= 280 && mediaValores <= 750 && amplitude < 180) {
     return true;
   }
   return false;

@@ -107,7 +107,15 @@ void loop() {
       uint16_t position = qtr.readLineBlack(sensorValues);
       
       // --- DETECÇÃO DE SILVER TAPE (ENTRADA DA ZONA DE RESGATE) ---
+      static int votosSilverTape = 0;
       if (detectouSilverTape(sensorValues)) {
+        votosSilverTape++;
+      } else {
+        votosSilverTape = 0;
+      }
+      
+      if (votosSilverTape >= 4) { // Exige 4 confirmações consecutivas (~10ms) para filtrar ruídos
+        votosSilverTape = 0; // Reseta o contador
         controlarRodas(0, 0);
         delay(150); // Breve pausa para estabilização física do chassi
         
@@ -386,21 +394,29 @@ void loop() {
       if (millis() - tempoEntradaResgate > TEMPO_MINIMO_RESGATE) {
         uint16_t vIR[NUM_SENSORES_IR];
         qtr.readLineBlack(vIR);
-        bool achouLinhaSaida = false;
+        int sensoresNaLinha = 0;
         for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-          if (vIR[i] > 600) { // Linha preta sólida
-            achouLinhaSaida = true;
-            break;
+          if (vIR[i] > 650) { // Linha preta sólida
+            sensoresNaLinha++;
           }
         }
-        if (achouLinhaSaida) {
+        
+        static int votosSaida = 0;
+        if (sensoresNaLinha >= 2) { // Exige pelo menos 2 sensores na fita preta
+          votosSaida++;
+        } else {
+          votosSaida = 0;
+        }
+        
+        if (votosSaida >= 4) { // Exige 4 confirmações consecutivas (~10ms)
           controlarRodas(0, 0);
           ultimoErro = 0;
           contadorFalhas = 0;
           modoLinha = SEGUINDO;
           estadoAtual = ESTADO_LINHA;
           tempoEntradaResgate = 0; // Reseta cronômetro do resgate
-          Serial.println(F("[RESGATE] Saida detectada! Retornando ao ESTADO_LINHA."));
+          votosSaida = 0;
+          Serial.println(F("[RESGATE] Saida confirmada! Retornando ao ESTADO_LINHA."));
           break;
         }
       }
@@ -410,9 +426,25 @@ void loop() {
         case RESGATE_ENTRANDO: {
           // Avança de forma cega para adentrar o portal e cruzar a silver tape
           controlarRodas(VELOCIDADE_RESGATE, VELOCIDADE_RESGATE);
-          if (millis() - tempoInicioResgate > 1200) {
-            modoResgate = RESGATE_SEGUINDO_PAREDE;
-            Serial.println(F("[RESGATE] Avanco de entrada concluido. Seguindo parede."));
+          
+          unsigned long tempoDecorrido = millis() - tempoInicioResgate;
+          // Ignora sensores nos primeiros 800ms para passar pelo portal
+          if (tempoDecorrido > 800) {
+            // Se detectar parede na frente, para e gira 90° à esquerda para alinhar-se à parede
+            if (distFrente <= 18) {
+              controlarRodas(0, 0);
+              tcaselect(CANAL_GY521);
+              mpu.update();
+              anguloInicialResgate = mpu.getAngleZ();
+              tempoInicioResgate = millis();
+              modoResgate = RESGATE_GIRANDO_ESQUERDA;
+              Serial.println(F("[RESGATE] Parede frontal na entrada! Girando a esquerda."));
+            }
+            // Se detectar a parede da direita, começa a seguir diretamente
+            else if (distDir <= 22) {
+              modoResgate = RESGATE_SEGUINDO_PAREDE;
+              Serial.println(F("[RESGATE] Parede direita detectada na entrada! Iniciando Wall-Following."));
+            }
           }
           break;
         }
@@ -451,7 +483,7 @@ void loop() {
         
         case RESGATE_GIRANDO_ESQUERDA: {
           // Gira no próprio eixo para a esquerda (convenção: anti-horário é positivo no Yaw)
-          controlarRodas(-90, 90);
+          controlarRodas(90, -90);
           float anguloAlvo = anguloInicialResgate + 88.0; // 88° para compensar inércia física do chassi
           
           float anguloAtual = mpu.getAngleZ();
@@ -485,8 +517,8 @@ void loop() {
               registrouAnguloDireita = true;
             }
             
-            controlarRodas(95, -95);
-            float anguloAlvo = anguloGiroDireita - 88.0; // 88° com compensação inercial
+            controlarRodas(-95, 95);
+            float anguloAlvo = anguloGiroDireita - 88.0;
             
             float anguloAtual = mpu.getAngleZ();
             if (anguloAtual <= anguloAlvo) {
