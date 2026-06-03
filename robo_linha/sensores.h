@@ -239,7 +239,7 @@ bool avaliarInterseccao() {
     
     // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
     controlarRodas(100, 100); 
-    delay(100); 
+    delay(250); 
     pararMotores();
     delay(50); 
 
@@ -262,6 +262,71 @@ bool avaliarInterseccao() {
   
   // Retorna falso para a FSM do loop voltar a caçar a linha com o PID (que agora verá a curva de 90!)
   return false; 
+}
+
+// ==============================================================================
+// SISTEMA DE MEMÓRIA (EEPROM)
+// ==============================================================================
+void salvarCalibracaoEEPROM() {
+  Serial.println(F("\nSalvando calibração na EEPROM..."));
+  int addr = 1;
+  
+  // Salva RGB e Luminiosidade
+  EEPROM.put(addr, verdeCalibradoDir); addr += sizeof(verdeCalibradoDir);
+  EEPROM.put(addr, verdeCalibradoEsq); addr += sizeof(verdeCalibradoEsq);
+  EEPROM.put(addr, limiarLuminosidadeDir); addr += sizeof(limiarLuminosidadeDir);
+  EEPROM.put(addr, limiarLuminosidadeEsq); addr += sizeof(limiarLuminosidadeEsq);
+  
+  // Salva o limite Preto e Branco da barra IR (8 posições para mínimo e 8 para máximo)
+  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+    EEPROM.put(addr, qtr.calibrationOn.minimum[i]); addr += sizeof(uint16_t);
+  }
+  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+    EEPROM.put(addr, qtr.calibrationOn.maximum[i]); addr += sizeof(uint16_t);
+  }
+  
+  // Marca registrada: o número "123" no endereço 0 significa que existe uma calibração válida salva.
+  EEPROM.write(0, 123); 
+  Serial.println(F("Salvo com sucesso!"));
+}
+
+void carregarCalibracaoEEPROM() {
+  if (EEPROM.read(0) != 123) {
+    Serial.println(F("ERRO: Nenhuma calibração encontrada na memória. Forçando recalibração!"));
+    estadoAtual = ESTADO_CALIBRACAO;
+    return;
+  }
+
+  Serial.println(F("Carregando memoria da ultima corrida..."));
+  
+  // Truque: Chama a calibração 1x rapidinho só pra biblioteca QTR "alocar" a memória das variáveis
+  qtr.calibrate(); 
+
+  int addr = 1;
+  EEPROM.get(addr, verdeCalibradoDir); addr += sizeof(verdeCalibradoDir);
+  EEPROM.get(addr, verdeCalibradoEsq); addr += sizeof(verdeCalibradoEsq);
+  EEPROM.get(addr, limiarLuminosidadeDir); addr += sizeof(limiarLuminosidadeDir);
+  EEPROM.get(addr, limiarLuminosidadeEsq); addr += sizeof(limiarLuminosidadeEsq);
+  
+  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+    EEPROM.get(addr, qtr.calibrationOn.minimum[i]); addr += sizeof(uint16_t);
+  }
+  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+    EEPROM.get(addr, qtr.calibrationOn.maximum[i]); addr += sizeof(uint16_t);
+  }
+
+  Serial.println(F("Memória do RGB e IR carregada!"));
+
+  // Calibra apenas o giroscópio (pois precisa estar nivelado no momento de largar)
+  Serial.println(F("Calibrando Giroscopio (NAO TOQUE NO ROBO)..."));
+  tcaselect(CANAL_GY521);
+  delay(100);
+  mpu.calcOffsets(true, true);
+  
+  Serial.println(F(">>> PRONTO! LARGANDO... <<<"));
+  delay(1000); // Tempinho pra tirar a mão
+  
+  estadoAtual = ESTADO_LINHA;
 }
 
 
@@ -339,6 +404,8 @@ void executarCalibracao() {
   if (verdeCalibradoDir.g == 0) { verdeCalibradoDir.r = 45; verdeCalibradoDir.g = 100; verdeCalibradoDir.b = 50; }
   if (verdeCalibradoEsq.g == 0) { verdeCalibradoEsq.r = 45; verdeCalibradoEsq.g = 100; verdeCalibradoEsq.b = 50; }
   
+  salvarCalibracaoEEPROM();
+
   Serial.println(F("\n====== [CALIBRAÇÃO CONCLUÍDA! LARGANDO...] ======\n"));
   delay(1000); 
   

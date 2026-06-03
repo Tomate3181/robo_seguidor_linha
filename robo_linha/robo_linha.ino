@@ -4,8 +4,8 @@
 #include "motores.h"
 #include "sensores.h"
 
-// Variável global para armazenar o estado atual da Máquina de Estados Finitos (FSM)
-EstadoRobo estadoAtual = ESTADO_CALIBRACAO;
+// Variável global para armazenar o estado atual da FSM
+EstadoRobo estadoAtual = ESTADO_AGUARDANDO_INICIO; 
 
 // Variáveis de controle de linha
 ModoLinha modoLinha = SEGUINDO;
@@ -83,6 +83,58 @@ void loop() {
     Wire.clearWireTimeoutFlag(); // Destrava limpando o erro interno
     tcaselect(CANAL_GY521);      // Força o reestabelecimento do canal do giroscópio no TCA
   }
+
+  // ==============================================================================
+  // GESTÃO GLOBAL DO BOTÃO (LIGAR, LARGAR, PAUSAR E RECALIBRAR)
+  // ==============================================================================
+  static bool botaoAnterior = HIGH;
+  bool botaoAtual = digitalRead(PINO_BOTAO);
+
+  if (estadoAtual == ESTADO_AGUARDANDO_INICIO) {
+    // ESTAMOS NO MENU DE INICIO
+    static unsigned long tempoPrint = 0;
+    if (millis() - tempoPrint > 2000) {
+      Serial.println(F("\n--- MODO DE INICIO ---"));
+      Serial.println(F("1 CLIQUE RAPIDO: Carrega da Memoria e Larga!"));
+      Serial.println(F("SEGURAR 2 SEGS:  Forcar Nova Calibracao"));
+      tempoPrint = millis();
+    }
+
+    if (botaoAtual == LOW) {
+      unsigned long tempoPressionado = millis();
+      // Congela enquanto o dedo estiver no botão pra ver se foi clique ou segurada
+      while (digitalRead(PINO_BOTAO) == LOW) { delay(10); } 
+      
+      if (millis() - tempoPressionado > 1500) {
+        // Segurou muito tempo = Recalibrar
+        estadoAtual = ESTADO_CALIBRACAO;
+      } else {
+        // Clique rápido = Carregar
+        carregarCalibracaoEEPROM();
+      }
+    }
+  } 
+  else if (estadoAtual != ESTADO_CALIBRACAO) {
+    // LÓGICA DO PLAY/PAUSE DURANTE A CORRIDA
+    // Se a transição foi de não apertado para apertado:
+    if (botaoAtual == LOW && botaoAnterior == HIGH) {
+      delay(50); // Filtro mecânico do botão
+      if (digitalRead(PINO_BOTAO) == LOW) {
+        
+        if (estadoAtual == ESTADO_PAUSADO) {
+          // Play!
+          Serial.println(F(">>> RETOMANDO CORRIDA! <<<"));
+          estadoAtual = ESTADO_LINHA;
+        } else {
+          // Pause!
+          Serial.println(F("||  ROBÔ PAUSADO!  ||"));
+          pararMotores();
+          estadoAtual = ESTADO_PAUSADO;
+        }
+      }
+    }
+  }
+  botaoAnterior = botaoAtual;
   
   // Atualiza o giroscópio a cada ciclo para o rastreio do Yaw(Z) não perder precisão
   tcaselect(CANAL_GY521);

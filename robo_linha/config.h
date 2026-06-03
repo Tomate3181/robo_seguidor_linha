@@ -2,10 +2,14 @@
 #define CONFIG_H
 
 #include <Arduino.h>
+#include <EEPROM.h> // ADICIONADO: Biblioteca da memória permanente
 
 // ==============================================================================
 // MAPEAMENTO DE HARDWARE (Arduino Mega 2560)
 // ==============================================================================
+
+// --- Sensores e Entradas ---
+#define PINO_BOTAO 23
 
 // --- Sensores IR (Barra QRE-8D) ---
 #define NUM_SENSORES_IR 8
@@ -15,17 +19,15 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {30, 31, 32, 33, 34, 35, 36, 37};
 #define TCA_ADDR 0x70
 
 // Canais do Multiplexador
-
 #define CANAL_GY521    1
 #define CANAL_TCS_DIR  2
 #define CANAL_TCS_ESQ  3
 
 // --- Motores (Shield - M1, M2, M3, M4) ---
-// Mapeamento extraído da programação antiga (seguirLinha_v2.0.ino)
-#define MOTOR_TR_DIR 2  // Antigo m_tras_dir(1)
-#define MOTOR_TR_ESQ 1  // Antigo m_tras_esq(2)
-#define MOTOR_FR_DIR 3  // Antigo m_frente_dir(3)
-#define MOTOR_FR_ESQ 4  // Antigo m_frente_esq(4)
+#define MOTOR_TR_DIR 2  
+#define MOTOR_TR_ESQ 1  
+#define MOTOR_FR_DIR 3  
+#define MOTOR_FR_ESQ 4  
 
 // --- Sensores Ultrassônicos (HC-SR04) ---
 #define PINO_TRIG_FRENTE 48
@@ -37,21 +39,20 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {30, 31, 32, 33, 34, 35, 36, 37};
 #define PINO_TRIG_DIR 52
 #define PINO_ECHO_DIR 53
 
-#define MAX_DISTANCE 60 // Distância máxima para ping (em cm). 60cm ~ 3.5ms de timeout.
-
-// Botão para avançar a calibração
-#define PINO_BOTAO 23
+#define MAX_DISTANCE 60 
 
 // ==============================================================================
 // DEFINIÇÕES DA MÁQUINA DE ESTADOS (FSM)
 // ==============================================================================
 
 enum EstadoRobo {
+  ESTADO_AGUARDANDO_INICIO, // ADICIONADO: O robô liga neste estado
   ESTADO_CALIBRACAO,
   ESTADO_LINHA,
   ESTADO_VERDE,
   ESTADO_VERMELHO,
-  ESTADO_OBSTACULO
+  ESTADO_OBSTACULO,
+  ESTADO_PAUSADO            // ADICIONADO: Estado de congelamento
 };
 
 // ==============================================================================
