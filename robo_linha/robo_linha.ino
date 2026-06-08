@@ -33,6 +33,8 @@ float anguloInicialResgate = 0;
 unsigned long tempoEntradaResgate = 0;
 bool registrouAnguloDireita = false;
 float anguloGiroDireita = 0;
+// BUG #3b FIX: Extraída do escopo 'static' para poder ser resetada entre sub-estados
+int votosSemParede = 0;
 
 
 // ==============================================================================
@@ -108,28 +110,63 @@ void loop() {
       
       // --- DETECÇÃO DE SILVER TAPE (ENTRADA DA ZONA DE RESGATE) ---
       static int votosSilverTape = 0;
+      bool suspeitaSilverTape = false;
+
       if (detectouSilverTape(sensorValues)) {
         votosSilverTape++;
+        suspeitaSilverTape = true;
       } else {
         votosSilverTape = 0;
       }
       
+      // SE ELE DESCONFIAR DA SILVER TAPE, VAI RETO E IGNORA O RESTO!
+      if (suspeitaSilverTape && votosSilverTape < 4) {
+        controlarRodas(VELOCIDADE_BASE, VELOCIDADE_BASE);
+        break; // Sai do switch para NÃO executar o PID de linha abaixo
+      }
+      
       if (votosSilverTape >= 4) { // Exige 4 confirmações consecutivas (~10ms) para filtrar ruídos
-        votosSilverTape = 0; // Reseta o contador
-        controlarRodas(0, 0);
-        delay(150); // Breve pausa para estabilização física do chassi
+        // BUG #2b FIX: Confirmação TCS34725 agora usa DOIS CRITÉRIOS:
+        //   1. Luminosidade bruta 'c' alta → reflexividade metálica da silver tape
+        //   2. Assinatura cromática (neutra: R≈G≈B) via ehCinzaRGB()
+        // Isso torna o sistema robusto MESMO SEM calibração prévia do cinza.
+        uint16_t rD, gD, bD, cD;
+        uint16_t rE, gE, bE, cE;
         
-        estadoAtual = ESTADO_RESGATE;
-        modoResgate = RESGATE_ENTRANDO;
-        tempoInicioResgate = millis();
-        tempoEntradaResgate = millis();
+        tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+        tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
         
-        tcaselect(CANAL_GY521);
-        mpu.update();
-        anguloInicialResgate = mpu.getAngleZ();
+        bool dirConfirma = ehCinzaRGB(rD, gD, bD, cD, cinzaCalibradoDir);
+        bool esqConfirma = ehCinzaRGB(rE, gE, bE, cE, cinzaCalibradoEsq);
         
-        Serial.println(F("[ALERTA] Silver tape detectada! Transitando para ESTADO_RESGATE."));
-        break; // Sai do case ESTADO_LINHA
+        // LOG DIAGNÓSTICO: Imprime valores brutos para tuning em pista
+        Serial.print(F("[SILVER] TCS_DIR c=")); Serial.print(cD);
+        Serial.print(F(" TCS_ESQ c=")); Serial.print(cE);
+        Serial.print(F(" | DIR=")); Serial.print(dirConfirma);
+        Serial.print(F(" ESQ=")); Serial.println(esqConfirma);
+        
+        // Se pelo menos um dos sensores confirmar (reflexividade + cromatica)
+        if (dirConfirma || esqConfirma) {
+          votosSilverTape = 0; // Reseta o contador
+          controlarRodas(0, 0);
+          delay(150); // Breve pausa para estabilização física do chassi
+          
+          estadoAtual = ESTADO_RESGATE;
+          modoResgate = RESGATE_ENTRANDO;
+          tempoInicioResgate = millis();
+          tempoEntradaResgate = millis();
+          votosSemParede = 0; // Reseta o contador global do wall-following
+          
+          tcaselect(CANAL_GY521);
+          mpu.update();
+          anguloInicialResgate = mpu.getAngleZ();
+          
+          Serial.println(F("[ALERTA] Silver tape confirmada via RGB! Transitando para ESTADO_RESGATE."));
+          break; // Sai do case ESTADO_LINHA
+        } else {
+          votosSilverTape = 0; // Falso positivo, reseta
+          Serial.println(F("[INFO] Silver tape descartada pelo validador RGB (Falso Positivo)."));
+        }
       }
       
       // Varre TODOS os 8 sensores procurando qualquer indício de preto (> 500)
@@ -423,79 +460,102 @@ void loop() {
       
       // 4. Execução dos sub-estados da navegação do resgate
       switch (modoResgate) {
-        case RESGATE_ENTRANDO: {
-          // Avança de forma cega para adentrar o portal e cruzar a silver tape
+case RESGATE_ENTRANDO: {
           controlarRodas(VELOCIDADE_RESGATE, VELOCIDADE_RESGATE);
           
           unsigned long tempoDecorrido = millis() - tempoInicioResgate;
-          // Ignora sensores nos primeiros 800ms para passar pelo portal
+          // Ignora sensores nos primeiros 800ms para cruzar a silver tape totalmente
           if (tempoDecorrido > 800) {
-            // Se detectar parede na frente, para e gira 90° à esquerda para alinhar-se à parede
             if (distFrente <= 18) {
+              controlarRodas(-90, -90); // Dá uma pequena ré de 100ms para não raspar o bico girando
+              delay(100); 
               controlarRodas(0, 0);
-              tcaselect(CANAL_GY521);
-              mpu.update();
+              tcaselect(CANAL_GY521); mpu.update();
               anguloInicialResgate = mpu.getAngleZ();
               tempoInicioResgate = millis();
               modoResgate = RESGATE_GIRANDO_ESQUERDA;
-              Serial.println(F("[RESGATE] Parede frontal na entrada! Girando a esquerda."));
             }
-            // Se detectar a parede da direita, começa a seguir diretamente
-            else if (distDir <= 22) {
+            else if (distDir <= 25) { // Tolerância para "pegar" a parede lateral
+              votosSemParede = 0; // BUG #3b FIX: Garante contador limpo ao entrar
               modoResgate = RESGATE_SEGUINDO_PAREDE;
-              Serial.println(F("[RESGATE] Parede direita detectada na entrada! Iniciando Wall-Following."));
+            }
+            // BUG #3 FIX: Timeout reduzido de 2500ms para 1500ms.
+            // 2500ms era tempo demais parado sem encontrar parede → robô andava muito longe.
+            else if (tempoDecorrido > 1500) {
+              votosSemParede = 0; // BUG #3b FIX: Garante contador limpo ao entrar
+              modoResgate = RESGATE_SEGUINDO_PAREDE;
             }
           }
           break;
         }
         
         case RESGATE_SEGUINDO_PAREDE: {
-          // A: Parede frontal à vista -> parar e iniciar giro de 90° à esquerda (anti-horário)
+          // A: Parede frontal à vista -> parar e iniciar giro de 90° à esquerda
           if (distFrente <= DISTANCIA_OBSTACULO_FRENTE) {
             controlarRodas(0, 0);
-            tcaselect(CANAL_GY521);
-            mpu.update();
+            tcaselect(CANAL_GY521); mpu.update();
             anguloInicialResgate = mpu.getAngleZ();
             tempoInicioResgate = millis();
             modoResgate = RESGATE_GIRANDO_ESQUERDA;
-            Serial.println(F("[RESGATE] Parede frontal! Girando a esquerda."));
             break;
           }
           
           // B: Parede lateral direita sumiu -> iniciar contorno de quina externa
+          // BUG #3b FIX: votosSemParede agora é variável global (linha ~37)
+          // para poder ser resetada ao transitar de RESGATE_ENTRANDO para cá.
           if (distDir > DISTANCIA_QUINA_PAREDE) {
+            votosSemParede++; // Filtro de ruído do Sonar
+          } else {
+            votosSemParede = 0;
+          }
+
+          if (votosSemParede >= 3) { // Só gira se confirmar 3 vezes que a parede sumiu!
+            votosSemParede = 0;
             tempoInicioResgate = millis();
-            registrouAnguloDireita = false; // Garante que registrará no início do giro
+            registrouAnguloDireita = false; 
             modoResgate = RESGATE_GIRANDO_DIREITA;
-            Serial.println(F("[RESGATE] Parede direita sumiu! Iniciando contorno de quina."));
             break;
           }
           
-          // C: Controle Proporcional para se manter paralelo à parede direita
+          // C: Controle Proporcional (Wall-Following)
           int erroParede = distDir - DISTANCIA_ALVO_PAREDE;
+          
+          // TRAVA DE SEGURANÇA: Limita o erro máximo. 
+          // Impede solavancos violentos caso o sonar falhe e leia 60cm do nada.
+          erroParede = constrain(erroParede, -10, 10); 
+          
           int ajuste = erroParede * KP_PAREDE;
           
-          // Se a distância for menor que o alvo, 'ajuste' é negativo (curva para a esquerda/afastar da parede)
-          // Se a distância for maior que o alvo, 'ajuste' é positivo (curva para a direita/aproximar da parede)
           controlarRodas(VELOCIDADE_RESGATE - ajuste, VELOCIDADE_RESGATE + ajuste);
           break;
         }
         
         case RESGATE_GIRANDO_ESQUERDA: {
-          // Gira no próprio eixo para a esquerda (convenção: anti-horário é positivo no Yaw)
-          controlarRodas(90, -90);
-          float anguloAlvo = anguloInicialResgate + 88.0; // 88° para compensar inércia física do chassi
-          
+          // BUG #4 FIX: Giro com controle PROPORCIONAL (igual ao ESTADO_VERDE).
+          // A velocidade fixa 90 causava overshoot físico — o chassi continuava
+          // girando por inércia mesmo depois do código parar os motores.
+          // Com velocidade proporcional, o robô desacelera ao se aproximar do alvo.
+          float anguloAlvo  = anguloInicialResgate + 88.0; // 88° para compensar inércia
           float anguloAtual = mpu.getAngleZ();
-          if (anguloAtual >= anguloAlvo) {
+          float erroAngulo  = anguloAlvo - anguloAtual;
+          
+          if (erroAngulo > 2.0) {
+            // Velocidade proporcional: rápido longe, lento perto
+            // Mínimo 60 para ter torque suficiente; máximo 130 para evitar inércia
+            int velGiro = constrain(60 + (int)(erroAngulo * 2.0), 60, 130);
+            controlarRodas(velGiro, -velGiro); // Anti-horário = esquerda
+          } else {
+            // Atingiu o ângulo alvo!
             controlarRodas(0, 0);
+            votosSemParede = 0; // Reseta contador ao entrar no seguidor de parede
             modoResgate = RESGATE_SEGUINDO_PAREDE;
             Serial.println(F("[RESGATE] Giro a esquerda finalizado."));
           }
           
-          // Timeout de emergência
+          // Timeout de emergência (mantido para segurança)
           if (millis() - tempoInicioResgate > 2500) {
             controlarRodas(0, 0);
+            votosSemParede = 0;
             modoResgate = RESGATE_SEGUINDO_PAREDE;
             Serial.println(F("[RESGATE] Timeout no giro a esquerda!"));
           }

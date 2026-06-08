@@ -70,7 +70,7 @@ const int TEMPO_PARA_12CM = 1000; // Tempo em ms para andar 12cm
 // --- Parâmetros da Zona de Resgate (Wall-Following) ---
 const int VELOCIDADE_RESGATE = 110;          // Velocidade base na zona de resgate
 const int DISTANCIA_ALVO_PAREDE = 15;        // Distância alvo para a parede lateral (em cm)
-const int DISTANCIA_OBSTACULO_FRENTE = 15;   // Distância limite para detectar parede frontal (em cm)
+const int DISTANCIA_OBSTACULO_FRENTE = 18; // Aumentado de 15 para 18
 const int DISTANCIA_QUINA_PAREDE = 32;       // Distância a partir da qual a parede lateral sumiu (quina) (em cm)
 const float KP_PAREDE = 4.5;                 // Ganho proporcional do seguidor de parede
 const unsigned long TEMPO_AVANCO_QUINA = 400;  // Tempo para avançar após perder a parede para contornar a quina (em ms)

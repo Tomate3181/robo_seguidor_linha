@@ -46,6 +46,9 @@ struct AssinaturaCor {
 AssinaturaCor verdeCalibradoDir = {0, 0, 0, 0};
 AssinaturaCor verdeCalibradoEsq = {0, 0, 0, 0};
 
+AssinaturaCor cinzaCalibradoDir = {0, 0, 0, 0};
+AssinaturaCor cinzaCalibradoEsq = {0, 0, 0, 0};
+
 // Referências às variáveis globais em robo_linha.ino
 extern EstadoRobo estadoAtual;
 extern int tipoGiro;
@@ -173,28 +176,119 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 
 
 // ==============================================================================
+// VALIDAÇÃO CROMÁTICA DO CINZA (SILVER TAPE) VIA TCS34725
+// ==============================================================================
+// Estratégia em DUAS CAMADAS:
+//   CAMADA 1 (Física): A silver tape é altamente reflexiva → 'c' será ALTO.
+//                      Se c for baixo, não pode ser prata. Rejeita imediatamente.
+//   CAMADA 2 (Cromática): Compara as proporções R/G/B normalizadas com a calibração.
+//                         O cinza é neutro: R≈G≈B em proporções (~33% cada).
+//
+// CORREÇÕES DO BUG ORIGINAL:
+//   - REMOVIDO: 'if (calib.c == 0) return true' → era um fail-safe perigoso.
+//     Se o usuário não calibrou, o sistema não deve aceitar qualquer coisa como cinza.
+//   - AJUSTADO: limiar de c de 80 para 200 (ignora ruído real do sensor em escuro).
+//   - ADICIONADO: critério de luminosidade positiva (c > 500) como reforço para
+//     confirmar superfície brilhante, característica física da silver tape.
+bool ehCinzaRGB(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {
+
+  // --- CAMADA 1: Verificação Física de Reflexividade ---
+  // Luminosidade mínima: evita ler sombras, buracos ou superfícies escuras
+  if (c < 200) return false;
+
+  // A silver tape metálica é MUITO reflexiva. Se c for baixo demais, não é prata.
+  // Este critério funciona INDEPENDENTE da calibração cromática.
+  bool altaReflexividade = (c > 500);
+
+  // --- CAMADA 2: Verificação Cromática (só se calibração foi feita) ---
+  // Se não foi calibrado (c_calib == 0), usa apenas a reflexividade como critério
+  if (calib.c == 0) {
+    // Sem calibração: o cinza neutro deve ter proporções R≈G≈B (tolerância 8%)
+    uint32_t somaAtual = r + g + b;
+    if (somaAtual == 0) return false;
+    float rN = (float)r / somaAtual;
+    float gN = (float)g / somaAtual;
+    float bN = (float)b / somaAtual;
+    // Um cinza neutro perfeito seria 0.333 cada. Tolerância de 10% para prata.
+    bool cinzaNeutro = (abs(rN - 0.333f) < 0.10f &&
+                        abs(gN - 0.333f) < 0.10f &&
+                        abs(bN - 0.333f) < 0.10f);
+    return (altaReflexividade && cinzaNeutro);
+  }
+
+  // Com calibração: compara proporções cromáticas com a assinatura gravada
+  uint32_t somaCalib = calib.r + calib.g + calib.b;
+  if (somaCalib == 0) return altaReflexividade; // Calibração inválida: usa só reflexividade
+
+  uint32_t somaAtual = r + g + b;
+  if (somaAtual == 0) return false;
+
+  float rCalib = (float)calib.r / somaCalib;
+  float gCalib = (float)calib.g / somaCalib;
+  float bCalib = (float)calib.b / somaCalib;
+
+  float rAtual = (float)r / somaAtual;
+  float gAtual = (float)g / somaAtual;
+  float bAtual = (float)b / somaAtual;
+
+  // Tolerância cromática aumentada de 12% para 15%:
+  // A prata metálica pode variar bastante com ângulo e luz ambiente
+  float tolerancia = 0.15f;
+
+  bool cromaticaOk = (abs(rAtual - rCalib) < tolerancia &&
+                      abs(gAtual - gCalib) < tolerancia &&
+                      abs(bAtual - bCalib) < tolerancia);
+
+  // Aceita se AMBOS os critérios concordam (mais seguro)
+  // OU se a reflexividade for altíssima E a cromática estiver perto
+  return (altaReflexividade && cromaticaOk);
+}
+
+
+// ==============================================================================
 // DETECÇÃO DE SILVER TAPE (ENTRADA DO RESGATE)
 // ==============================================================================
 // A fita cinza/prata cobre a barra de sensores inteira na entrada da zona de resgate.
-// Quando o robô passa sobre ela, todos os 8 sensores IR lêem valores semelhantes
-// (baixa variabilidade) e na faixa mediana/cinza (entre 150 e 700).
+// O sensor QTR-RC retorna valores de 0 a ~2500 µs:
+//   ~0–150   → branco (muito reflexivo)
+//   ~200–900 → CINZA / PRATA (faixa alvo)
+//   ~1000+   → preto (pouco reflexivo)
+//
+// DIAGNÓSTICO DO BUG ORIGINAL:
+// A amplitude < 180 era o principal culpado. A silver tape tem reflexividade
+// variável dependendo do ângulo de incidência da luz e da posição do sensor,
+// então a amplitude real entre sensores pode facilmente superar 300.
+// Além disso, a janela 280–750 excluía leituras válidas abaixo de 280.
 bool detectouSilverTape(uint16_t *valores) {
-  uint16_t menorValor = 1000;
+  uint16_t menorValor = 3000; // Inicializa com valor máximo possível
   uint16_t maiorValor = 0;
   uint32_t somaValores = 0;
+  uint8_t sensoresNaFaixaCinza = 0; // Quantos sensores leram na faixa da prata
+
   for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
     if (valores[i] < menorValor) menorValor = valores[i];
     if (valores[i] > maiorValor) maiorValor = valores[i];
     somaValores += valores[i];
+
+    // Conta quantos sensores individuais estão na faixa do cinza/prata
+    if (valores[i] >= 150 && valores[i] <= 1000) {
+      sensoresNaFaixaCinza++;
+    }
   }
-  
+
   uint16_t mediaValores = somaValores / NUM_SENSORES_IR;
-  uint16_t amplitude = maiorValor - menorValor;
-  
-  // Condição de fita cinza refinada para evitar falso-positivo em fundo branco ou linhas pretas:
-  // - Média na faixa intermediária bem definida (280 a 750)
-  // - Amplitude muito pequena (homogeneidade completa cobrindo a barra)
-  if (mediaValores >= 280 && mediaValores <= 750 && amplitude < 180) {
+  uint16_t amplitude    = maiorValor - menorValor;
+
+  // Critério de detecção DUPLO (mais robusto):
+  // 1. A MÉDIA da barra precisa estar na faixa cinza/prata (200 a 900)
+  // 2. A AMPLITUDE entre sensores não pode ser altíssima (< 350 cobre variações reais)
+  //    - Isso ainda exclui leituras com metade preta + metade branca (amplitude > 600)
+  // 3. A MAIORIA dos sensores precisa estar individualmente na faixa (>= 5 de 8)
+  bool mediaNaFaixa       = (mediaValores >= 200 && mediaValores <= 900);
+  bool amplitudeTolerada  = (amplitude < 350);
+  bool maioriaNaFaixa     = (sensoresNaFaixaCinza >= 5);
+
+  if (mediaNaFaixa && amplitudeTolerada && maioriaNaFaixa) {
     return true;
   }
   return false;
@@ -349,9 +443,35 @@ void executarCalibracao() {
   Serial.print(F("[ESQ] R:")); Serial.print(verdeCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoEsq.b);
 
   // ---------------------------------------------------------
-  // FASE 3: POSICIONAMENTO FINAL
+  // FASE 3: GATILHO DA FITA CINZA (SILVER TAPE)
   // ---------------------------------------------------------
-  Serial.println(F("\n[FASE 3] Posicione o robô na LARGADA."));
+  Serial.println(F("\n[FASE 3] Coloque os DOIS sensores RGB sobre a fita CINZA (Silver Tape)."));
+  Serial.println(F("Mexa um pouquinho para ele pegar a cor, e APERTE O BOTÃO."));
+  
+  while (digitalRead(PINO_BOTAO) == HIGH) {
+    uint16_t rD, gD, bD, cD;
+    uint16_t rE, gE, bE, cE;
+    
+    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
+    
+    // Filtra ruído (escuro) e captura o cinza
+    if (cD > 80 && cE > 80) {
+      cinzaCalibradoDir.r = rD; cinzaCalibradoDir.g = gD; cinzaCalibradoDir.b = bD; cinzaCalibradoDir.c = cD;
+      cinzaCalibradoEsq.r = rE; cinzaCalibradoEsq.g = gE; cinzaCalibradoEsq.b = bE; cinzaCalibradoEsq.c = cE;
+    }
+    delay(10);
+  }
+  esperarBotao();
+  
+  Serial.println(F("--- MAPA DA ASSINATURA DO CINZA GRAVADA ---"));
+  Serial.print(F("[DIR] R:")); Serial.print(cinzaCalibradoDir.r); Serial.print(F(" G:")); Serial.print(cinzaCalibradoDir.g); Serial.print(F(" B:")); Serial.println(cinzaCalibradoDir.b);
+  Serial.print(F("[ESQ] R:")); Serial.print(cinzaCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(cinzaCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(cinzaCalibradoEsq.b);
+
+  // ---------------------------------------------------------
+  // FASE 4: POSICIONAMENTO FINAL
+  // ---------------------------------------------------------
+  Serial.println(F("\n[FASE 4] Posicione o robô na LARGADA."));
   Serial.println(F("Não toque no robô! APERTE O BOTÃO e afaste a mão para calibrar o Giroscópio."));
   esperarBotao();
   
