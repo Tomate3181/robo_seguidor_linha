@@ -42,6 +42,9 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {30, 31, 32, 33, 34, 35, 36, 37};
 // Botão para avançar a calibração
 #define PINO_BOTAO 23
 
+// Botão para resetar a programação (voltar ao estado original)
+#define PINO_BOTAO_RESET 42
+
 // ==============================================================================
 // DEFINIÇÕES DA MÁQUINA DE ESTADOS (FSM)
 // ==============================================================================

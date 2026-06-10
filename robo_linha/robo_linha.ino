@@ -61,6 +61,7 @@ void setup() {
   Serial.begin(115200);
   
   pinMode(PINO_BOTAO, INPUT_PULLUP); // Habilita o resistor interno do Arduino para o botão
+  pinMode(PINO_BOTAO_RESET, INPUT_PULLUP); // Habilita o resistor interno para o botão de reset
   
   // Inicializa o barramento I2C
   Wire.begin(); 
@@ -98,6 +99,49 @@ void loop() {
   tcaselect(CANAL_GY521);
   mpu.update();
 
+  // --- Botão de Reset (Porta 42) ---
+  static unsigned long tempoFimCooldownReset = 0;
+
+  // Se o botão for pressionado (LOW)
+  if (digitalRead(PINO_BOTAO_RESET) == LOW) {
+    if (tempoFimCooldownReset == 0) {
+      Serial.println(F("[RESET] Botao de Reset acionado! Voltando ao estado original..."));
+      controlarRodas(0, 0);
+      pararMotores();
+      
+      // Reseta o estado para seguimento de linha (mantendo a calibração prévia)
+      estadoAtual = ESTADO_LINHA;
+      modoLinha = SEGUINDO;
+      ultimoLado = 0;
+      ultimoErro = 0;
+      contadorFalhas = 0;
+      
+      // Define o fim do cooldown para daqui a 5 segundos (5000ms)
+      tempoFimCooldownReset = millis() + 5000;
+    }
+  }
+
+  // Se estiver sob cooldown do reset, mantém o robô parado e exibe contagem regressiva
+  if (tempoFimCooldownReset > 0) {
+    if (millis() < tempoFimCooldownReset) {
+      controlarRodas(0, 0);
+      pararMotores();
+      
+      static unsigned long ultimoPrintReset = 0;
+      if (millis() - ultimoPrintReset > 1000) {
+        ultimoPrintReset = millis();
+        unsigned long segundosRestantes = (tempoFimCooldownReset - millis()) / 1000 + 1;
+        Serial.print(F("[RESET] Retomando em "));
+        Serial.print(segundosRestantes);
+        Serial.println(F("s..."));
+      }
+      return; // Interrompe o loop principal para manter o robô parado no cooldown
+    } else {
+      tempoFimCooldownReset = 0;
+      Serial.println(F("[RESET] Cooldown finalizado! Iniciando movimento."));
+    }
+  }
+
   switch (estadoAtual) {
     case ESTADO_CALIBRACAO:
       // Executa a calibração dos sensores e do giroscópio
@@ -105,117 +149,79 @@ void loop() {
       break;
 
     case ESTADO_LINHA: {
-      // Leitura da posição da linha e dos sensores
       uint16_t position = qtr.readLineBlack(sensorValues);
       
-      // --- DETECÇÃO DE SILVER TAPE (ENTRADA DA ZONA DE RESGATE) ---
-      static int votosSilverTape = 0;
-      bool suspeitaSilverTape = false;
+      // Conta os sensores para tomar decisões lógicas ANTES do PID
+      int sensoresNoPreto = 0;
+      int sensoresNoCinza = 0;
 
-      if (detectouSilverTape(sensorValues)) {
-        votosSilverTape++;
-        suspeitaSilverTape = true;
-      } else {
-        votosSilverTape = 0;
+      for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+        if (sensorValues[i] > 650) {
+          sensoresNoPreto++; // Linha preta absoluta
+        } else if (sensorValues[i] > 150) {
+          sensoresNoCinza++; // Faixa reflexiva (cinza da silver tape ou sujeira)
+        }
       }
+
+      bool vendoLinha = (sensoresNoPreto > 0);
+
+      // =====================================================================
+      // GATILHO 1: ENTRADA DA SILVER TAPE (MOMENTO ESPECÍFICO)
+      // REGRA DE OURO: Só procura a silver tape se a linha preta SUMIR!
+      // =====================================================================
+      static unsigned long tempoBloqueioCinza = 0;
       
-      // SE ELE DESCONFIAR DA SILVER TAPE, VAI RETO E IGNORA O RESTO!
-      if (suspeitaSilverTape && votosSilverTape < 4) {
-        controlarRodas(VELOCIDADE_BASE, VELOCIDADE_BASE);
-        break; // Sai do switch para NÃO executar o PID de linha abaixo
-      }
-      
-      if (votosSilverTape >= 4) { // Exige 4 confirmações consecutivas (~10ms) para filtrar ruídos
-        // Confirmação TCS34725: 3 critérios simultâneos via ehCinzaRGB()
-        //   1. JANELA c (150–500): exclui branco difuso (>500) e escuro (<150)
-        //   2. NEUTRALIDADE R≈G≈B: cinza/prata não tem matiz dominante
-        //   3. SATURAÇÃO BAIXA (<15%): elimina cores do chão
-        uint16_t rD, gD, bD, cD;
-        uint16_t rE, gE, bE, cE;
-        
+      // Se não há preto (0) E a barra inteira está refletindo cinza (>=7)
+      if (sensoresNoPreto == 0 && sensoresNoCinza >= 7 && millis() > tempoBloqueioCinza) {
+        controlarRodas(0, 0); // Para o robô para ter certeza
+        delay(60);
+
+        uint16_t rD, gD, bD, cD, rE, gE, bE, cE;
         tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
         tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
-        
-        bool dirConfirma = ehCinzaRGB(rD, gD, bD, cD, cinzaCalibradoDir);
-        bool esqConfirma = ehCinzaRGB(rE, gE, bE, cE, cinzaCalibradoEsq);
-        
-        // LOG DIAGNÓSTICO COMPLETO: use esses valores para ajustar limiares em pista
-        // Silver tape real deve ter: c=150~500, R≈G≈B (diferença < ~30 entre canais)
-        // Branco deve ser bloqueado por: c > 500
-        Serial.print(F("[SILVER_DIR] R=")); Serial.print(rD);
-        Serial.print(F(" G=")); Serial.print(gD);
-        Serial.print(F(" B=")); Serial.print(bD);
-        Serial.print(F(" C=")); Serial.print(cD);
-        Serial.print(F(" -> ")); Serial.println(dirConfirma ? F("OK") : F("FALSO"));
-        
-        Serial.print(F("[SILVER_ESQ] R=")); Serial.print(rE);
-        Serial.print(F(" G=")); Serial.print(gE);
-        Serial.print(F(" B=")); Serial.print(bE);
-        Serial.print(F(" C=")); Serial.print(cE);
-        Serial.print(F(" -> ")); Serial.println(esqConfirma ? F("OK") : F("FALSO"));
-        
-        // Se pelo menos um dos sensores confirmar (reflexividade + cromatica)
-        if (dirConfirma || esqConfirma) {
-          votosSilverTape = 0; // Reseta o contador
-          controlarRodas(0, 0);
-          delay(150); // Breve pausa para estabilização física do chassi
-          
+
+        if (ehCinzaRGB(rD, gD, bD, cD, cinzaCalibradoDir) || ehCinzaRGB(rE, gE, bE, cE, cinzaCalibradoEsq)) {
+          // Confirmou! É o resgate!
           estadoAtual = ESTADO_RESGATE;
           modoResgate = RESGATE_ENTRANDO;
           tempoInicioResgate = millis();
           tempoEntradaResgate = millis();
-          votosSemParede = 0; // Reseta o contador global do wall-following
+          votosSemParede = 0;
           
-          tcaselect(CANAL_GY521);
-          mpu.update();
+          tcaselect(CANAL_GY521); mpu.update();
           anguloInicialResgate = mpu.getAngleZ();
           
-          Serial.println(F("[ALERTA] Silver tape confirmada via RGB! Transitando para ESTADO_RESGATE."));
-          break; // Sai do case ESTADO_LINHA
+          Serial.println(F("[RESGATE] Silver tape VALIDADA via RGB! Entrando na sala."));
+          break; // Vai pro resgate
         } else {
-          votosSilverTape = 0; // Falso positivo, reseta
-          Serial.println(F("[INFO] Silver tape descartada pelo validador RGB (Falso Positivo)."));
-        }
-      }
-      
-      // Varre TODOS os 8 sensores procurando qualquer indício de preto (> 500)
-      bool vendoLinha = false;
-      int sensoresNoPreto = 0;
-
-      for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-        if (sensorValues[i] > 500) {
-          vendoLinha = true;
-          sensoresNoPreto++;
+          // Era apenas uma sombra/reflexo no branco liso. RGB desmentiu.
+          tempoBloqueioCinza = millis() + 2000; // Bloqueia verificação por 2.0s
+          Serial.println(F("[CINZA] Falso Positivo descartado pelo RGB."));
         }
       }
 
       // =====================================================================
-      // GATILHO INTELIGENTE: LEITURA DE COR SOB DEMANDA
-      // Se 4 ou mais sensores detectam preto, assumimos que é uma linha horizontal (Cruzamento ou T)
-      // O temporizador evita que ele leia o mesmo cruzamento várias vezes seguidas
+      // GATILHO 2: CRUZAMENTOS VERDE/VERMELHO (MOMENTO ESPECÍFICO)
       // =====================================================================
       static unsigned long tempoUltimoCruzamento = 0;
-      if (sensoresNoPreto >= 4 && (millis() - tempoUltimoCruzamento > 1500)) {
+      if (sensoresNoPreto >= 4 && (millis() - tempoUltimoCruzamento > 1000)) {
         tempoUltimoCruzamento = millis();
+        bool mudouEstado = avaliarInterseccao(); 
         
-        bool mudouEstado = avaliarInterseccao(); // A mágica acontece aqui
-        
-        // Se a função detectou verde ou vermelho, ela já alterou o estadoAtual.
         if (mudouEstado) {
-          break; // Sai do case ESTADO_LINHA e vai processar a cor no loop
+          break; // Achou verde/vermelho, sai do case ESTADO_LINHA
         }
       }
+
       // =====================================================================
-
-
-      // Verifica sonar frontal a cada 50ms para não travar o loop
+      // GATILHO 3: OBSTÁCULO FRONTAL (SONAR)
+      // =====================================================================
       if (millis() - tempoUltimoSonar > 50) {
         tempoUltimoSonar = millis();
         if (obterDistanciaFiltrada(sonarFrente) <= 10) {
-          controlarRodas(0, 0); // Para imediatamente
+          controlarRodas(0, 0); 
           modoObstaculo = GIRO_INICIAL;
-          tcaselect(CANAL_GY521);
-          mpu.update();
+          tcaselect(CANAL_GY521); mpu.update();
           anguloInicialObstaculo = mpu.getAngleZ();
           tempoInicioObstaculo = millis();
           estadoAtual = ESTADO_OBSTACULO;
@@ -223,22 +229,23 @@ void loop() {
         }
       }
 
-      // Máquina de estados interna para controle da linha (Não-bloqueante)
+      // =====================================================================
+      // MÁQUINA DE ESTADOS DO PID (O Seguidor de Linha em si)
+      // Agora ele roda LIMPO, sem interrupções e travas no meio da pista
+      // =====================================================================
       switch (modoLinha) {
         case SEGUINDO:
-          if (!vendoLinha) {
+          if (!vendoLinha) { // O preto sumiu (Gap ou Quina)
             modoLinha = INSISTINDO;
             tempoInicioInsistir = millis();
           } else {
             contadorFalhas = 0; 
             int erro = 3500 - position;
             
-            // Memoriza o lado para curvas fechadas, mas zera se estiver andando reto
             if (erro > 500) ultimoLado = 1;       
             else if (erro < -500) ultimoLado = -1; 
-            else if (abs(erro) < 300) ultimoLado = 0; // Se perder a linha no gap, não vai girar loucamente!
+            else if (abs(erro) < 300) ultimoLado = 0; 
 
-            // Cálculo do PID
             int P = erro * KP;
             int D = (erro - ultimoErro) * KD;
             int ajuste = P + D;
@@ -249,19 +256,13 @@ void loop() {
           break;
 
         case INSISTINDO:
-          // Tenta insistir na curva por 300ms (dá mais tempo para virar os 90 graus)
           if (millis() - tempoInicioInsistir < 300) {
-            // Mais força na virada se estava em curva. Se estava reto (ultimoLado == 0), apenas vai reto
             if (ultimoLado == 1) controlarRodas(220, -180); 
             else if (ultimoLado == -1) controlarRodas(-180, 220);
-            else controlarRodas(VELOCIDADE_BASE, VELOCIDADE_BASE); // Gap! Vai reto.
+            else controlarRodas(VELOCIDADE_BASE, VELOCIDADE_BASE); 
 
-            // CORREÇÃO: Aceita a linha em QUALQUER uma das abas dos 8 sensores para se recuperar
-            if (vendoLinha) {
-              modoLinha = SEGUINDO; 
-            }
+            if (vendoLinha) modoLinha = SEGUINDO; 
           } else {
-            // Falhou em encontrar a linha, passa para o tratamento de Gap
             contadorFalhas++;
             if (contadorFalhas >= 3) {
               modoLinha = GAP_RE_AJUSTE;
@@ -274,37 +275,25 @@ void loop() {
           break;
 
         case GAP_AVANCA:
-          // Avança pelo tempo determinado para buscar a linha após um gap
           if (millis() - tempoInicioGap < TEMPO_PARA_12CM) {
             controlarRodas(VELOCIDADE_GAP, VELOCIDADE_GAP);
-            
-            // CORREÇÃO: Monitora os 8 sensores. Se o robô estiver torto no meio do Gap 
-            // e a linha bater em uma das pontas, ele captura instantaneamente.
-            if (vendoLinha) {
-              modoLinha = SEGUINDO; 
-            }
+            if (vendoLinha) modoLinha = SEGUINDO; 
           } else {
-            // Não encontrou andando para frente, recua procurando nos 8 sensores
             controlarRodas(-VELOCIDADE_GAP, -VELOCIDADE_GAP);
-            if (vendoLinha) {
-              modoLinha = SEGUINDO;
-            }
+            if (vendoLinha) modoLinha = SEGUINDO;
           }
           break;
 
         case GAP_RE_AJUSTE:
-          // Dá ré por 2 segundos após falhar várias vezes no gap
           if (millis() - tempoInicioGap < 2000) {
             controlarRodas(-100, -100);
-            
-            // Se durante a marcha ré algum dos 8 sensores encostar na linha, aborta o re-ajuste
             if (vendoLinha) {
               contadorFalhas = 0;
               modoLinha = SEGUINDO;
             }
           } else {
             contadorFalhas = 0;
-            modoLinha = SEGUINDO; // Retoma a tentativa de seguir
+            modoLinha = SEGUINDO;
           }
           break;
       }
@@ -420,7 +409,6 @@ void loop() {
     }
 
     case ESTADO_RESGATE: {
-      // 1. Leitura periódica e não-bloqueante dos sonares (a cada 50ms)
       static unsigned long tempoUltimoSonarResgate = 0;
       static int distFrente = MAX_DISTANCE;
       static int distDir = MAX_DISTANCE;
@@ -431,45 +419,38 @@ void loop() {
         distDir = obterDistanciaFiltrada(sonarDir);
       }
       
-      // 2. Registro do cronômetro de início da zona de resgate
       if (tempoEntradaResgate == 0) {
         tempoEntradaResgate = millis();
       }
       
-      // 3. Verificação de saída de emergência: caso detecte a linha preta após tempo mínimo
+      // =====================================================================
+      // VALIDAÇÃO DA SAÍDA DO RESGATE (EXCLUSIVA VIA IR - MAIS VELOZ)
+      // =====================================================================
       if (millis() - tempoEntradaResgate > TEMPO_MINIMO_RESGATE) {
         uint16_t vIR[NUM_SENSORES_IR];
         qtr.readLineBlack(vIR);
         int sensoresNaLinha = 0;
         for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-          if (vIR[i] > 650) { // Linha preta sólida
+          if (vIR[i] > 650) { 
             sensoresNaLinha++;
           }
         }
         
-        static int votosSaida = 0;
-        if (sensoresNaLinha >= 2) { // Exige pelo menos 2 sensores na fita preta
-          votosSaida++;
-        } else {
-          votosSaida = 0;
-        }
-        
-        if (votosSaida >= 4) { // Exige 4 confirmações consecutivas (~10ms)
-          controlarRodas(0, 0);
+        // Se o IR identificou uma linha preta sólida (pelo menos 2 sensores na linha)
+        if (sensoresNaLinha >= 2) { 
           ultimoErro = 0;
           contadorFalhas = 0;
           modoLinha = SEGUINDO;
           estadoAtual = ESTADO_LINHA;
-          tempoEntradaResgate = 0; // Reseta cronômetro do resgate
-          votosSaida = 0;
-          Serial.println(F("[RESGATE] Saida confirmada! Retornando ao ESTADO_LINHA."));
+          tempoEntradaResgate = 0; 
+          Serial.println(F("[RESGATE] Saida detectada via IR! Voltando pra linha."));
           break;
         }
       }
       
       // 4. Execução dos sub-estados da navegação do resgate
       switch (modoResgate) {
-case RESGATE_ENTRANDO: {
+        case RESGATE_ENTRANDO: {
           controlarRodas(VELOCIDADE_RESGATE, VELOCIDADE_RESGATE);
           
           unsigned long tempoDecorrido = millis() - tempoInicioResgate;

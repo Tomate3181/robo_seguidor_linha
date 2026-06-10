@@ -182,7 +182,7 @@ bool ehCinzaRGB(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &c
   
   // CRITÉRIO 1: JANELA DE LUMINOSIDADE (Sua maior defesa contra o Ladrilho Branco)
   // Ladrilho branco bate 600+. Silver tape fica em 200~300. Superfície preta < 100.
-  if (c < 120 || c > 520) return false; 
+  if (c < 120 || c > 500) return false; 
 
   // CRITÉRIO 2: VALIDAÇÃO POR PERFIL (Baseado na calibração)
   // Em vez de assumir R=G=B, calculamos a proporção de cada cor em relação à luminosidade total (C).
@@ -218,104 +218,63 @@ bool ehCinzaRGB(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &c
 
 
 // ==============================================================================
-// DETECÇÃO DE SILVER TAPE (IR) - GATILHO MAIS ROBUSTO
+// DETECÇÃO DE SILVER TAPE (IR) - BLINDADO CONTRA CURVAS E CRUZAMENTOS
 // ==============================================================================
 bool detectouSilverTape(uint16_t *valores) {
-  uint32_t somaValores = 0;
-  uint8_t sensoresNaFaixaCaotica = 0;
+  uint8_t sensoresNoCinza = 0;
+  uint8_t sensoresNoPreto = 0;
 
   for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-    somaValores += valores[i];
-    
-    // Na fita prata, o sensor lê valores médios/altos, fugindo do branco absoluto (<150)
-    // e do preto absoluto (>1200 na sua pista pelo que parece)
-    if (valores[i] > 150 && valores[i] < 1200) {
-      sensoresNaFaixaCaotica++;
+    // O QTR retorna valores calibrados de 0 (branco) a 1000 (preto)
+    if (valores[i] > 800) {
+      sensoresNoPreto++; // Achou uma linha preta absoluta
+    } else if (valores[i] > 150) {
+      sensoresNoCinza++; // 150 a 800 -> Reflexão irregular da fita metálica
     }
   }
 
-  uint16_t mediaValores = somaValores / NUM_SENSORES_IR;
-
-  // Removido o teste de "Amplitude". A prata reflete caóticamente!
-  // Critério: A média precisa ser cinza E a MAIORIA dos sensores precisa estar nessa zona caótica.
-  bool mediaNaFaixa   = (mediaValores > 200 && mediaValores < 950);
-  bool maioriaNaFaixa = (sensoresNaFaixaCaotica >= 5); // 5 de 8 sensores estão lendo "esquisito"
-
-  if (mediaNaFaixa && maioriaNaFaixa) {
-    return true; // Avisa a FSM para parar e checar com o RGB!
+  // REGRA: A fita prata é larga e não é totalmente preta.
+  // Exigimos que a MAIORIA da barra (>= 5) esteja no cinza,
+  // E que não exista uma linha preta nítida (<= 2 no preto).
+  // Isso impede disparos falsos em "T" (cruzamentos) e curvas agudas!
+  if (sensoresNoCinza >= 5 && sensoresNoPreto <= 2) {
+    return true; 
   }
+  
   return false;
 }
 
 
 // ==============================================================================
-// NOVA LEITURA DE COR (Varredura Contínua e Retorno de Segurança)
+// NOVA LEITURA DE CRUZAMENTO (Super Rápida - Não quebra as curvas de 90º)
 // ==============================================================================
 bool avaliarInterseccao() {
-  unsigned long tempoInicio = millis();
+  // Para o robô para a leitura não sair borrada
+  pararMotores();
+  delay(80); // Tempo super rápido apenas para o chassi parar de tremer
   
-  int votosVerdeDir = 0;
-  int votosVerdeEsq = 0;
-  int votosVermelho = 0;
+  uint16_t rD, gD, bD, cD;
+  uint16_t rE, gE, bE, cE;
   
-  bool achouVerde = false;
-  bool achouVermelho = false;
+  tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+  tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  // 1. Avança devagar para "varrer" o chão à frente
-  controlarRodas(80, 80);
+  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
   
-  // 2. Fica filmando o chão por 250ms (Tempo suficiente pro sensor passar sobre toda a fita)
-  while (millis() - tempoInicio < 250) { 
-    uint16_t rD, gD, bD, cD;
-    uint16_t rE, gE, bE, cE;
-    
-    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
-    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
-    
-    // Verifica Lado Direito
-    if (ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir)) votosVerdeDir++;
-    else votosVerdeDir = 0; // Se piscar outra cor, zera. Exige leitura CONSECUTIVA!
-    
-    // Verifica Lado Esquerdo
-    if (ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq)) votosVerdeEsq++;
-    else votosVerdeEsq = 0;
-    
-    // Verifica Vermelho
-    if (ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir) || ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq)) votosVermelho++;
-    else votosVermelho = 0;
-    
-    // Se achou a cor 2 VEZES SEGUIDAS, confirmamos a detecção imediatamente!
-    if (votosVerdeDir >= 2 || votosVerdeEsq >= 2) {
-      achouVerde = true;
-      break; 
-    }
-    if (votosVermelho >= 2) {
-      achouVermelho = true;
-      break;
-    }
-  }
-  
-  pararMotores(); // Acabou a varredura
-  
-  // --- DECISÕES DA VARREDURA ---
-  
-  if (achouVermelho) {
-    estadoAtual = ESTADO_VERMELHO;
-    return true;
-  }
-  
-  if (achouVerde) {
-    if (votosVerdeDir >= 2 && votosVerdeEsq >= 2) {
+  // Se achou o verde, resolve a curva!
+  if (verdeDir || verdeEsq) {
+    if (verdeDir && verdeEsq) {
       tipoGiro = 180;
-    } else if (votosVerdeDir >= 2) {
+    } else if (verdeDir) {
       tipoGiro = 70;
-    } else if (votosVerdeEsq >= 2) {
+    } else if (verdeEsq) {
       tipoGiro = -70;
     }
     
     // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
     controlarRodas(100, 100); 
-    delay(200); 
+    delay(150); 
     pararMotores();
     delay(50); 
 
@@ -327,17 +286,18 @@ bool avaliarInterseccao() {
     return true; 
   }
 
-  // ===== O MOONWALK (RÉ DE SEGURANÇA) =====
-  // Se chegou aqui, a varredura durou os 250ms completos e não viu NADA verde.
-  // Isso significa que era apenas uma curva de 90 graus preta!
-  // Como andamos pra frente e perdemos a quina, damos ré pela mesma quantidade de tempo
-  // para devolver os sensores infravermelhos exatamente em cima da curva!
-  controlarRodas(-80, -80);
-  delay(250); 
-  pararMotores();
+  // Verifica Vermelho
+  if (ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir) || ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq)) {
+    estadoAtual = ESTADO_VERMELHO;
+    return true;
+  }
   
-  // Retorna falso para a FSM do loop voltar a caçar a linha com o PID (que agora verá a curva de 90!)
-  return false; 
+  // SE CHEGOU AQUI: Era só uma curva preta grossa de 90 graus!
+  // REMOVIDO A RÉ! Apenas dá um mini-pulo pra frente para o PID "engolir" a curva sem perder momento.
+  controlarRodas(100, 100);
+  delay(40);
+  
+  return false; // Retorna falso para o PID voltar a trabalhar imediatamente
 }
 
 
