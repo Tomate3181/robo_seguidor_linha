@@ -176,120 +176,73 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 
 
 // ==============================================================================
-// VALIDAÇÃO CROMÁTICA DO CINZA (SILVER TAPE) VIA TCS34725
+// VALIDAÇÃO CROMÁTICA DO CINZA (SILVER TAPE) OTIMIZADA
 // ==============================================================================
-// Estratégia em DUAS CAMADAS:
-//   CAMADA 1 (Física): A silver tape é altamente reflexiva → 'c' será ALTO.
-//                      Se c for baixo, não pode ser prata. Rejeita imediatamente.
-//   CAMADA 2 (Cromática): Compara as proporções R/G/B normalizadas com a calibração.
-//                         O cinza é neutro: R≈G≈B em proporções (~33% cada).
-//
-// CORREÇÕES DO BUG ORIGINAL:
-//   - REMOVIDO: 'if (calib.c == 0) return true' → era um fail-safe perigoso.
-//     Se o usuário não calibrou, o sistema não deve aceitar qualquer coisa como cinza.
-//   - AJUSTADO: limiar de c de 80 para 200 (ignora ruído real do sensor em escuro).
-//   - ADICIONADO: critério de luminosidade positiva (c > 500) como reforço para
-//     confirmar superfície brilhante, característica física da silver tape.
 bool ehCinzaRGB(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {
+  
+  // CRITÉRIO 1: JANELA DE LUMINOSIDADE (Sua maior defesa contra o Ladrilho Branco)
+  // Ladrilho branco bate 600+. Silver tape fica em 200~300. Superfície preta < 100.
+  if (c < 120 || c > 520) return false; 
 
-  // --- CAMADA 1: Verificação Física de Reflexividade ---
-  // Luminosidade mínima: evita ler sombras, buracos ou superfícies escuras
-  if (c < 200) return false;
+  // CRITÉRIO 2: VALIDAÇÃO POR PERFIL (Baseado na calibração)
+  // Em vez de assumir R=G=B, calculamos a proporção de cada cor em relação à luminosidade total (C).
+  // Isso cria um "DNA" da cor que sobrevive a mudanças de iluminação.
+  if (calib.c > 0) {
+    float propR_atual = (float)r / c;
+    float propG_atual = (float)g / c;
+    float propB_atual = (float)b / c;
 
-  // A silver tape metálica é MUITO reflexiva. Se c for baixo demais, não é prata.
-  // Este critério funciona INDEPENDENTE da calibração cromática.
-  bool altaReflexividade = (c > 500);
+    float propR_calib = (float)calib.r / calib.c;
+    float propG_calib = (float)calib.g / calib.c;
+    float propB_calib = (float)calib.b / calib.c;
 
-  // --- CAMADA 2: Verificação Cromática (só se calibração foi feita) ---
-  // Se não foi calibrado (c_calib == 0), usa apenas a reflexividade como critério
-  if (calib.c == 0) {
-    // Sem calibração: o cinza neutro deve ter proporções R≈G≈B (tolerância 8%)
-    uint32_t somaAtual = r + g + b;
-    if (somaAtual == 0) return false;
-    float rN = (float)r / somaAtual;
-    float gN = (float)g / somaAtual;
-    float bN = (float)b / somaAtual;
-    // Um cinza neutro perfeito seria 0.333 cada. Tolerância de 10% para prata.
-    bool cinzaNeutro = (abs(rN - 0.333f) < 0.10f &&
-                        abs(gN - 0.333f) < 0.10f &&
-                        abs(bN - 0.333f) < 0.10f);
-    return (altaReflexividade && cinzaNeutro);
+    // Tolerância de 25% de desvio em relação ao que foi calibrado (Silver tape sofre muita variação de ângulo)
+    const float TOLERANCIA = 0.25f; 
+
+    if (abs(propR_atual - propR_calib) > TOLERANCIA) return false;
+    if (abs(propG_atual - propG_calib) > TOLERANCIA) return false;
+    if (abs(propB_atual - propB_calib) > TOLERANCIA) return false;
+
+    return true; // Passou no teste contra a calibração!
+  } 
+  else {
+    // CRITÉRIO 3: FALLBACK (Se o competidor esquecer de calibrar o cinza)
+    // Apenas garantimos que não há uma cor gritando muito mais que as outras (ex: não é verde)
+    // O canal G costuma ser o maior no TCS34725, mas não pode ser o dobro do R ou B.
+    if (g > (r * 1.8) || g > (b * 1.8)) return false; 
+    if (r > (g * 1.5) || b > (g * 1.5)) return false;
+
+    return true;
   }
-
-  // Com calibração: compara proporções cromáticas com a assinatura gravada
-  uint32_t somaCalib = calib.r + calib.g + calib.b;
-  if (somaCalib == 0) return altaReflexividade; // Calibração inválida: usa só reflexividade
-
-  uint32_t somaAtual = r + g + b;
-  if (somaAtual == 0) return false;
-
-  float rCalib = (float)calib.r / somaCalib;
-  float gCalib = (float)calib.g / somaCalib;
-  float bCalib = (float)calib.b / somaCalib;
-
-  float rAtual = (float)r / somaAtual;
-  float gAtual = (float)g / somaAtual;
-  float bAtual = (float)b / somaAtual;
-
-  // Tolerância cromática aumentada de 12% para 15%:
-  // A prata metálica pode variar bastante com ângulo e luz ambiente
-  float tolerancia = 0.15f;
-
-  bool cromaticaOk = (abs(rAtual - rCalib) < tolerancia &&
-                      abs(gAtual - gCalib) < tolerancia &&
-                      abs(bAtual - bCalib) < tolerancia);
-
-  // Aceita se AMBOS os critérios concordam (mais seguro)
-  // OU se a reflexividade for altíssima E a cromática estiver perto
-  return (altaReflexividade && cromaticaOk);
 }
 
 
 // ==============================================================================
-// DETECÇÃO DE SILVER TAPE (ENTRADA DO RESGATE)
+// DETECÇÃO DE SILVER TAPE (IR) - GATILHO MAIS ROBUSTO
 // ==============================================================================
-// A fita cinza/prata cobre a barra de sensores inteira na entrada da zona de resgate.
-// O sensor QTR-RC retorna valores de 0 a ~2500 µs:
-//   ~0–150   → branco (muito reflexivo)
-//   ~200–900 → CINZA / PRATA (faixa alvo)
-//   ~1000+   → preto (pouco reflexivo)
-//
-// DIAGNÓSTICO DO BUG ORIGINAL:
-// A amplitude < 180 era o principal culpado. A silver tape tem reflexividade
-// variável dependendo do ângulo de incidência da luz e da posição do sensor,
-// então a amplitude real entre sensores pode facilmente superar 300.
-// Além disso, a janela 280–750 excluía leituras válidas abaixo de 280.
 bool detectouSilverTape(uint16_t *valores) {
-  uint16_t menorValor = 3000; // Inicializa com valor máximo possível
-  uint16_t maiorValor = 0;
   uint32_t somaValores = 0;
-  uint8_t sensoresNaFaixaCinza = 0; // Quantos sensores leram na faixa da prata
+  uint8_t sensoresNaFaixaCaotica = 0;
 
   for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-    if (valores[i] < menorValor) menorValor = valores[i];
-    if (valores[i] > maiorValor) maiorValor = valores[i];
     somaValores += valores[i];
-
-    // Conta quantos sensores individuais estão na faixa do cinza/prata
-    if (valores[i] >= 150 && valores[i] <= 1000) {
-      sensoresNaFaixaCinza++;
+    
+    // Na fita prata, o sensor lê valores médios/altos, fugindo do branco absoluto (<150)
+    // e do preto absoluto (>1200 na sua pista pelo que parece)
+    if (valores[i] > 150 && valores[i] < 1200) {
+      sensoresNaFaixaCaotica++;
     }
   }
 
   uint16_t mediaValores = somaValores / NUM_SENSORES_IR;
-  uint16_t amplitude    = maiorValor - menorValor;
 
-  // Critério de detecção DUPLO (mais robusto):
-  // 1. A MÉDIA da barra precisa estar na faixa cinza/prata (200 a 900)
-  // 2. A AMPLITUDE entre sensores não pode ser altíssima (< 350 cobre variações reais)
-  //    - Isso ainda exclui leituras com metade preta + metade branca (amplitude > 600)
-  // 3. A MAIORIA dos sensores precisa estar individualmente na faixa (>= 5 de 8)
-  bool mediaNaFaixa       = (mediaValores >= 200 && mediaValores <= 900);
-  bool amplitudeTolerada  = (amplitude < 350);
-  bool maioriaNaFaixa     = (sensoresNaFaixaCinza >= 5);
+  // Removido o teste de "Amplitude". A prata reflete caóticamente!
+  // Critério: A média precisa ser cinza E a MAIORIA dos sensores precisa estar nessa zona caótica.
+  bool mediaNaFaixa   = (mediaValores > 200 && mediaValores < 950);
+  bool maioriaNaFaixa = (sensoresNaFaixaCaotica >= 5); // 5 de 8 sensores estão lendo "esquisito"
 
-  if (mediaNaFaixa && amplitudeTolerada && maioriaNaFaixa) {
-    return true;
+  if (mediaNaFaixa && maioriaNaFaixa) {
+    return true; // Avisa a FSM para parar e checar com o RGB!
   }
   return false;
 }
@@ -362,7 +315,7 @@ bool avaliarInterseccao() {
     
     // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
     controlarRodas(100, 100); 
-    delay(100); 
+    delay(200); 
     pararMotores();
     delay(50); 
 

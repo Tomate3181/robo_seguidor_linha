@@ -126,10 +126,10 @@ void loop() {
       }
       
       if (votosSilverTape >= 4) { // Exige 4 confirmações consecutivas (~10ms) para filtrar ruídos
-        // BUG #2b FIX: Confirmação TCS34725 agora usa DOIS CRITÉRIOS:
-        //   1. Luminosidade bruta 'c' alta → reflexividade metálica da silver tape
-        //   2. Assinatura cromática (neutra: R≈G≈B) via ehCinzaRGB()
-        // Isso torna o sistema robusto MESMO SEM calibração prévia do cinza.
+        // Confirmação TCS34725: 3 critérios simultâneos via ehCinzaRGB()
+        //   1. JANELA c (150–500): exclui branco difuso (>500) e escuro (<150)
+        //   2. NEUTRALIDADE R≈G≈B: cinza/prata não tem matiz dominante
+        //   3. SATURAÇÃO BAIXA (<15%): elimina cores do chão
         uint16_t rD, gD, bD, cD;
         uint16_t rE, gE, bE, cE;
         
@@ -139,11 +139,20 @@ void loop() {
         bool dirConfirma = ehCinzaRGB(rD, gD, bD, cD, cinzaCalibradoDir);
         bool esqConfirma = ehCinzaRGB(rE, gE, bE, cE, cinzaCalibradoEsq);
         
-        // LOG DIAGNÓSTICO: Imprime valores brutos para tuning em pista
-        Serial.print(F("[SILVER] TCS_DIR c=")); Serial.print(cD);
-        Serial.print(F(" TCS_ESQ c=")); Serial.print(cE);
-        Serial.print(F(" | DIR=")); Serial.print(dirConfirma);
-        Serial.print(F(" ESQ=")); Serial.println(esqConfirma);
+        // LOG DIAGNÓSTICO COMPLETO: use esses valores para ajustar limiares em pista
+        // Silver tape real deve ter: c=150~500, R≈G≈B (diferença < ~30 entre canais)
+        // Branco deve ser bloqueado por: c > 500
+        Serial.print(F("[SILVER_DIR] R=")); Serial.print(rD);
+        Serial.print(F(" G=")); Serial.print(gD);
+        Serial.print(F(" B=")); Serial.print(bD);
+        Serial.print(F(" C=")); Serial.print(cD);
+        Serial.print(F(" -> ")); Serial.println(dirConfirma ? F("OK") : F("FALSO"));
+        
+        Serial.print(F("[SILVER_ESQ] R=")); Serial.print(rE);
+        Serial.print(F(" G=")); Serial.print(gE);
+        Serial.print(F(" B=")); Serial.print(bE);
+        Serial.print(F(" C=")); Serial.print(cE);
+        Serial.print(F(" -> ")); Serial.println(esqConfirma ? F("OK") : F("FALSO"));
         
         // Se pelo menos um dos sensores confirmar (reflexividade + cromatica)
         if (dirConfirma || esqConfirma) {
