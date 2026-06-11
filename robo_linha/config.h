@@ -42,6 +42,9 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {30, 31, 32, 33, 34, 35, 36, 37};
 // Botão para avançar a calibração
 #define PINO_BOTAO 23
 
+// Botão para resetar a programação (voltar ao estado original)
+#define PINO_BOTAO_RESET 42
+
 // ==============================================================================
 // DEFINIÇÕES DA MÁQUINA DE ESTADOS (FSM)
 // ==============================================================================
@@ -52,28 +55,29 @@ enum EstadoRobo {
   ESTADO_VERDE,
   ESTADO_VERMELHO,
   ESTADO_OBSTACULO,
+  ESTADO_VALIDACAO_RESGATE, // Novo estado: Validação rigorosa da silver tape
   ESTADO_RESGATE // Novo estado para a Zona de Resgate
 };
 
 // ==============================================================================
 // PARÂMETROS E CONSTANTES DE CONTROLE (PID E MOVIMENTO)
 // ==============================================================================
-const float KP = 0.06; // Constante Proporcional (Suavizado para evitar viradas bruscas)
-const float KD = 0.8;  // Constante Derivativa (Reduzido para não dar solavancos na leitura)
+const float KP = 0.15; // Constante Proporcional (Suavizado para evitar viradas bruscas)
+const float KD = 2.5;  // Constante Derivativa (Reduzido para não dar solavancos na leitura)
 const float KI = 0.0;  // Constante Integral (Geralmente 0 para seguidor de linha)
 
 const int VELOCIDADE_BASE = 120;
-const int VELOCIDADE_MAX = 255;  
+const int VELOCIDADE_MAX = 255;
 const int VELOCIDADE_GAP = 130;
-const int TEMPO_PARA_12CM = 1000; // Tempo em ms para andar 12cm
+const int TEMPO_PARA_12CM = 1200; // Tempo em ms para andar 12cm
 
 // --- Parâmetros da Zona de Resgate (Wall-Following) ---
 const int VELOCIDADE_RESGATE = 110;          // Velocidade base na zona de resgate
-const int DISTANCIA_ALVO_PAREDE = 15;        // Distância alvo para a parede lateral (em cm)
-const int DISTANCIA_OBSTACULO_FRENTE = 15;   // Distância limite para detectar parede frontal (em cm)
-const int DISTANCIA_QUINA_PAREDE = 32;       // Distância a partir da qual a parede lateral sumiu (quina) (em cm)
+const int DISTANCIA_ALVO_PAREDE = 12;        // Distância alvo para a parede lateral (em cm)
+const int DISTANCIA_OBSTACULO_FRENTE = 14; // Aumentado de 15 para 18
+const int DISTANCIA_QUINA_PAREDE = 20;       // Distância a partir da qual a parede lateral sumiu (quina) (em cm)
 const float KP_PAREDE = 4.5;                 // Ganho proporcional do seguidor de parede
-const unsigned long TEMPO_AVANCO_QUINA = 400;  // Tempo para avançar após perder a parede para contornar a quina (em ms)
+const unsigned long TEMPO_AVANCO_QUINA = 300;  // Tempo para avançar após perder a parede para contornar a quina (em ms)
 const unsigned long TEMPO_MINIMO_RESGATE = 5000; // Tempo mínimo na zona de resgate para evitar re-gatilho na entrada (em ms)
 
 // ==============================================================================
@@ -84,6 +88,11 @@ enum ModoLinha {
   INSISTINDO,
   GAP_AVANCA,
   GAP_RE_AJUSTE
+};
+
+enum ModoValidacao {
+  VALIDACAO_RE,
+  VALIDACAO_RGB
 };
 
 enum ModoObstaculo {

@@ -46,6 +46,9 @@ struct AssinaturaCor {
 AssinaturaCor verdeCalibradoDir = {0, 0, 0, 0};
 AssinaturaCor verdeCalibradoEsq = {0, 0, 0, 0};
 
+AssinaturaCor cinzaCalibradoDir = {0, 0, 0, 0};
+AssinaturaCor cinzaCalibradoEsq = {0, 0, 0, 0};
+
 // Referências às variáveis globais em robo_linha.ino
 extern EstadoRobo estadoAtual;
 extern int tipoGiro;
@@ -173,102 +176,137 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 
 
 // ==============================================================================
-// DETECÇÃO DE SILVER TAPE (ENTRADA DO RESGATE)
+// VALIDAÇÃO CROMÁTICA DO CINZA RIGOROSA (Sem falso positivo - Margem exata)
 // ==============================================================================
-// A fita cinza/prata cobre a barra de sensores inteira na entrada da zona de resgate.
-// Quando o robô passa sobre ela, todos os 8 sensores IR lêem valores semelhantes
-// (baixa variabilidade) e na faixa mediana/cinza (entre 150 e 700).
-bool detectouSilverTape(uint16_t *valores) {
-  uint16_t menorValor = 1000;
-  uint16_t maiorValor = 0;
-  uint32_t somaValores = 0;
-  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-    if (valores[i] < menorValor) menorValor = valores[i];
-    if (valores[i] > maiorValor) maiorValor = valores[i];
-    somaValores += valores[i];
+bool ehCinzaRigoroso(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {
+  if (calib.c == 0) return false; // Falha imediata se não houve calibração
+
+  // Regra 4: Aplica margem de +/- 100 na luminosidade calibrada (Clear)
+  int limiteSuperior = calib.c + 100;
+  int limiteInferior = (calib.c > 100) ? (calib.c - 100) : 0;
+
+  if (c < limiteInferior || c > limiteSuperior) {
+    return false; // Fora da margem de erro
   }
+
+  // Verifica as proporções para garantir que a cor (cinza/branco) também bate com a calibração
+  float propR_atual = (float)r / c;
+  float propG_atual = (float)g / c;
+  float propB_atual = (float)b / c;
+
+  float propR_calib = (float)calib.r / calib.c;
+  float propG_calib = (float)calib.g / calib.c;
+  float propB_calib = (float)calib.b / calib.c;
+
+  const float TOLERANCIA = 0.20f; 
+
+  if (abs(propR_atual - propR_calib) > TOLERANCIA) return false;
+  if (abs(propG_atual - propG_calib) > TOLERANCIA) return false;
+  if (abs(propB_atual - propB_calib) > TOLERANCIA) return false;
+
+  return true; // Passou em todos os critérios rigorosos!
+}
+
+// ==============================================================================
+// VALIDAÇÃO CROMÁTICA DO CINZA (SILVER TAPE) OTIMIZADA
+// ==============================================================================
+bool ehCinzaRGB(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {
   
-  uint16_t mediaValores = somaValores / NUM_SENSORES_IR;
-  uint16_t amplitude = maiorValor - menorValor;
-  
-  // Condição de fita cinza refinada para evitar falso-positivo em fundo branco ou linhas pretas:
-  // - Média na faixa intermediária bem definida (280 a 750)
-  // - Amplitude muito pequena (homogeneidade completa cobrindo a barra)
-  if (mediaValores >= 280 && mediaValores <= 750 && amplitude < 180) {
+  // CRITÉRIO 1: JANELA DE LUMINOSIDADE (Sua maior defesa contra o Ladrilho Branco)
+  // Ladrilho branco bate 600+. Silver tape fica em 200~300. Superfície preta < 100.
+  if (c < 120 || c > 500) return false; 
+
+  // CRITÉRIO 2: VALIDAÇÃO POR PERFIL (Baseado na calibração)
+  // Em vez de assumir R=G=B, calculamos a proporção de cada cor em relação à luminosidade total (C).
+  // Isso cria um "DNA" da cor que sobrevive a mudanças de iluminação.
+  if (calib.c > 0) {
+    float propR_atual = (float)r / c;
+    float propG_atual = (float)g / c;
+    float propB_atual = (float)b / c;
+
+    float propR_calib = (float)calib.r / calib.c;
+    float propG_calib = (float)calib.g / calib.c;
+    float propB_calib = (float)calib.b / calib.c;
+
+    // Tolerância de 25% de desvio em relação ao que foi calibrado (Silver tape sofre muita variação de ângulo)
+    const float TOLERANCIA = 0.25f; 
+
+    if (abs(propR_atual - propR_calib) > TOLERANCIA) return false;
+    if (abs(propG_atual - propG_calib) > TOLERANCIA) return false;
+    if (abs(propB_atual - propB_calib) > TOLERANCIA) return false;
+
+    return true; // Passou no teste contra a calibração!
+  } 
+  else {
+    // CRITÉRIO 3: FALLBACK (Se o competidor esquecer de calibrar o cinza)
+    // Apenas garantimos que não há uma cor gritando muito mais que as outras (ex: não é verde)
+    // O canal G costuma ser o maior no TCS34725, mas não pode ser o dobro do R ou B.
+    if (g > (r * 1.8) || g > (b * 1.8)) return false; 
+    if (r > (g * 1.5) || b > (g * 1.5)) return false;
+
     return true;
   }
+}
+
+
+// ==============================================================================
+// DETECÇÃO DE SILVER TAPE (IR) - BLINDADO CONTRA CURVAS E CRUZAMENTOS
+// ==============================================================================
+bool detectouSilverTape(uint16_t *valores) {
+  uint8_t sensoresNoCinza = 0;
+  uint8_t sensoresNoPreto = 0;
+
+  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+    // O QTR retorna valores calibrados de 0 (branco) a 1000 (preto)
+    if (valores[i] > 800) {
+      sensoresNoPreto++; // Achou uma linha preta absoluta
+    } else if (valores[i] > 150) {
+      sensoresNoCinza++; // 150 a 800 -> Reflexão irregular da fita metálica
+    }
+  }
+
+  // REGRA: A fita prata é larga e não é totalmente preta.
+  // Exigimos que a MAIORIA da barra (>= 5) esteja no cinza,
+  // E que não exista uma linha preta nítida (<= 2 no preto).
+  // Isso impede disparos falsos em "T" (cruzamentos) e curvas agudas!
+  if (sensoresNoCinza >= 5 && sensoresNoPreto <= 2) {
+    return true; 
+  }
+  
   return false;
 }
 
 
 // ==============================================================================
-// NOVA LEITURA DE COR (Varredura Contínua e Retorno de Segurança)
+// NOVA LEITURA DE CRUZAMENTO (Super Rápida - Não quebra as curvas de 90º)
 // ==============================================================================
 bool avaliarInterseccao() {
-  unsigned long tempoInicio = millis();
+  // Para o robô para a leitura não sair borrada
+  pararMotores();
+  delay(80); // Tempo super rápido apenas para o chassi parar de tremer
   
-  int votosVerdeDir = 0;
-  int votosVerdeEsq = 0;
-  int votosVermelho = 0;
+  uint16_t rD, gD, bD, cD;
+  uint16_t rE, gE, bE, cE;
   
-  bool achouVerde = false;
-  bool achouVermelho = false;
+  tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+  tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  // 1. Avança devagar para "varrer" o chão à frente
-  controlarRodas(80, 80);
+  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
   
-  // 2. Fica filmando o chão por 250ms (Tempo suficiente pro sensor passar sobre toda a fita)
-  while (millis() - tempoInicio < 250) { 
-    uint16_t rD, gD, bD, cD;
-    uint16_t rE, gE, bE, cE;
-    
-    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
-    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
-    
-    // Verifica Lado Direito
-    if (ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir)) votosVerdeDir++;
-    else votosVerdeDir = 0; // Se piscar outra cor, zera. Exige leitura CONSECUTIVA!
-    
-    // Verifica Lado Esquerdo
-    if (ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq)) votosVerdeEsq++;
-    else votosVerdeEsq = 0;
-    
-    // Verifica Vermelho
-    if (ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir) || ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq)) votosVermelho++;
-    else votosVermelho = 0;
-    
-    // Se achou a cor 2 VEZES SEGUIDAS, confirmamos a detecção imediatamente!
-    if (votosVerdeDir >= 2 || votosVerdeEsq >= 2) {
-      achouVerde = true;
-      break; 
-    }
-    if (votosVermelho >= 2) {
-      achouVermelho = true;
-      break;
-    }
-  }
-  
-  pararMotores(); // Acabou a varredura
-  
-  // --- DECISÕES DA VARREDURA ---
-  
-  if (achouVermelho) {
-    estadoAtual = ESTADO_VERMELHO;
-    return true;
-  }
-  
-  if (achouVerde) {
-    if (votosVerdeDir >= 2 && votosVerdeEsq >= 2) {
+  // Se achou o verde, resolve a curva!
+  if (verdeDir || verdeEsq) {
+    if (verdeDir && verdeEsq) {
       tipoGiro = 180;
-    } else if (votosVerdeDir >= 2) {
-      tipoGiro = 70;
-    } else if (votosVerdeEsq >= 2) {
-      tipoGiro = -70;
+    } else if (verdeDir) {
+      tipoGiro = 65;
+    } else if (verdeEsq) {
+      tipoGiro = -65;
     }
     
     // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
     controlarRodas(100, 100); 
-    delay(100); 
+    delay(150); 
     pararMotores();
     delay(50); 
 
@@ -280,17 +318,18 @@ bool avaliarInterseccao() {
     return true; 
   }
 
-  // ===== O MOONWALK (RÉ DE SEGURANÇA) =====
-  // Se chegou aqui, a varredura durou os 250ms completos e não viu NADA verde.
-  // Isso significa que era apenas uma curva de 90 graus preta!
-  // Como andamos pra frente e perdemos a quina, damos ré pela mesma quantidade de tempo
-  // para devolver os sensores infravermelhos exatamente em cima da curva!
-  controlarRodas(-80, -80);
-  delay(250); 
-  pararMotores();
+  // Verifica Vermelho
+  if (ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir) || ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq)) {
+    estadoAtual = ESTADO_VERMELHO;
+    return true;
+  }
   
-  // Retorna falso para a FSM do loop voltar a caçar a linha com o PID (que agora verá a curva de 90!)
-  return false; 
+  // SE CHEGOU AQUI: Era só uma curva preta grossa de 90 graus!
+  // REMOVIDO A RÉ! Apenas dá um mini-pulo pra frente para o PID "engolir" a curva sem perder momento.
+  controlarRodas(100, 100);
+  delay(40);
+  
+  return false; // Retorna falso para o PID voltar a trabalhar imediatamente
 }
 
 
@@ -349,9 +388,35 @@ void executarCalibracao() {
   Serial.print(F("[ESQ] R:")); Serial.print(verdeCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoEsq.b);
 
   // ---------------------------------------------------------
-  // FASE 3: POSICIONAMENTO FINAL
+  // FASE 3: GATILHO DA FITA CINZA (SILVER TAPE)
   // ---------------------------------------------------------
-  Serial.println(F("\n[FASE 3] Posicione o robô na LARGADA."));
+  Serial.println(F("\n[FASE 3] Coloque os DOIS sensores RGB sobre a fita CINZA (Silver Tape)."));
+  Serial.println(F("Mexa um pouquinho para ele pegar a cor, e APERTE O BOTÃO."));
+  
+  while (digitalRead(PINO_BOTAO) == HIGH) {
+    uint16_t rD, gD, bD, cD;
+    uint16_t rE, gE, bE, cE;
+    
+    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
+    
+    // Filtra ruído (escuro) e captura o cinza
+    if (cD > 80 && cE > 80) {
+      cinzaCalibradoDir.r = rD; cinzaCalibradoDir.g = gD; cinzaCalibradoDir.b = bD; cinzaCalibradoDir.c = cD;
+      cinzaCalibradoEsq.r = rE; cinzaCalibradoEsq.g = gE; cinzaCalibradoEsq.b = bE; cinzaCalibradoEsq.c = cE;
+    }
+    delay(10);
+  }
+  esperarBotao();
+  
+  Serial.println(F("--- MAPA DA ASSINATURA DO CINZA GRAVADA ---"));
+  Serial.print(F("[DIR] R:")); Serial.print(cinzaCalibradoDir.r); Serial.print(F(" G:")); Serial.print(cinzaCalibradoDir.g); Serial.print(F(" B:")); Serial.println(cinzaCalibradoDir.b);
+  Serial.print(F("[ESQ] R:")); Serial.print(cinzaCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(cinzaCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(cinzaCalibradoEsq.b);
+
+  // ---------------------------------------------------------
+  // FASE 4: POSICIONAMENTO FINAL
+  // ---------------------------------------------------------
+  Serial.println(F("\n[FASE 4] Posicione o robô na LARGADA."));
   Serial.println(F("Não toque no robô! APERTE O BOTÃO e afaste a mão para calibrar o Giroscópio."));
   esperarBotao();
   

@@ -21,6 +21,10 @@
   - **Porta 1 (Giroscópio GY-521):** SDA - roxo - SD1 | SCL - azul - SC1
   - **Porta 2 (Sensor RGB TCS34725 - Direita):** SDA - roxo - SD2 | SCL - azul - SC2
   - **Porta 3 (Sensor RGB TCS34725 - Esquerda):** SDA - roxo - SD3 | SCL - azul - SC3
+- **Botões (Push Buttons):**
+  - **Calibração (Avançar Fases):** Porta Digital 23 (Pull-up interno)
+  - **Reset da Programação (Recomeçar Pista):** Porta Digital 42 (Pull-up interno)
+
 
 ## ⚙️ Arquitetura do Software (FSM)
 O robô opera através de uma Máquina de Estados Finitos:
