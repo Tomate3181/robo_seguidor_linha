@@ -176,6 +176,38 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
 
 
 // ==============================================================================
+// VALIDAÇÃO CROMÁTICA DO CINZA RIGOROSA (Sem falso positivo - Margem exata)
+// ==============================================================================
+bool ehCinzaRigoroso(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {
+  if (calib.c == 0) return false; // Falha imediata se não houve calibração
+
+  // Regra 4: Aplica margem de +/- 100 na luminosidade calibrada (Clear)
+  int limiteSuperior = calib.c + 100;
+  int limiteInferior = (calib.c > 100) ? (calib.c - 100) : 0;
+
+  if (c < limiteInferior || c > limiteSuperior) {
+    return false; // Fora da margem de erro
+  }
+
+  // Verifica as proporções para garantir que a cor (cinza/branco) também bate com a calibração
+  float propR_atual = (float)r / c;
+  float propG_atual = (float)g / c;
+  float propB_atual = (float)b / c;
+
+  float propR_calib = (float)calib.r / calib.c;
+  float propG_calib = (float)calib.g / calib.c;
+  float propB_calib = (float)calib.b / calib.c;
+
+  const float TOLERANCIA = 0.20f; 
+
+  if (abs(propR_atual - propR_calib) > TOLERANCIA) return false;
+  if (abs(propG_atual - propG_calib) > TOLERANCIA) return false;
+  if (abs(propB_atual - propB_calib) > TOLERANCIA) return false;
+
+  return true; // Passou em todos os critérios rigorosos!
+}
+
+// ==============================================================================
 // VALIDAÇÃO CROMÁTICA DO CINZA (SILVER TAPE) OTIMIZADA
 // ==============================================================================
 bool ehCinzaRGB(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {

@@ -36,6 +36,40 @@ float anguloGiroDireita = 0;
 // BUG #3b FIX: Extraída do escopo 'static' para poder ser resetada entre sub-estados
 int votosSemParede = 0;
 
+// Variáveis de Validação da Zona de Resgate
+bool suspeitaResgateAtiva = false;
+unsigned long tempoSuspeitaResgate = 0;
+ModoValidacao modoValidacao = VALIDACAO_RE;
+unsigned long tempoInicioValidacao = 0;
+
+// ==============================================================================
+// VARIÁVEIS E FUNÇÕES DE DEBUG
+// ==============================================================================
+EstadoRobo ultimoEstadoDebug = ESTADO_CALIBRACAO;
+ModoLinha ultimoModoLinhaDebug = SEGUINDO;
+
+String getNomeEstado(EstadoRobo e) {
+  switch(e) {
+    case ESTADO_CALIBRACAO: return "CALIBRACAO";
+    case ESTADO_LINHA: return "LINHA";
+    case ESTADO_VERDE: return "VERDE";
+    case ESTADO_VERMELHO: return "VERMELHO";
+    case ESTADO_OBSTACULO: return "OBSTACULO";
+    case ESTADO_VALIDACAO_RESGATE: return "VALIDACAO_RESGATE";
+    case ESTADO_RESGATE: return "RESGATE";
+    default: return "DESCONHECIDO";
+  }
+}
+
+String getNomeModoLinha(ModoLinha m) {
+  switch(m) {
+    case SEGUINDO: return "SEGUINDO";
+    case INSISTINDO: return "INSISTINDO";
+    case GAP_AVANCA: return "GAP_AVANCA";
+    case GAP_RE_AJUSTE: return "GAP_RE_AJUSTE";
+    default: return "DESCONHECIDO";
+  }
+}
 
 // ==============================================================================
 // FUNÇÃO DO MULTIPLEXADOR I2C (TCA9548A)
@@ -87,6 +121,15 @@ void setup() {
 // ==============================================================================
 void loop() {
   // REGRA DE OURO: Código não-bloqueante. Não utilize delay() no loop principal!
+  
+  // RASTREADOR DE MUDANÇA DE ESTADO (DEBUG FSM)
+  if (estadoAtual != ultimoEstadoDebug) {
+    Serial.print(F("[DEBUG-FSM] Mudanca de Estado: "));
+    Serial.print(getNomeEstado(ultimoEstadoDebug));
+    Serial.print(F(" -> "));
+    Serial.println(getNomeEstado(estadoAtual));
+    ultimoEstadoDebug = estadoAtual;
+  }
   
   // APLICAÇÃO: Verificação ativa contra travamento físico do barramento I2C
   if (Wire.getWireTimeoutFlag()) {
@@ -166,42 +209,43 @@ void loop() {
       bool vendoLinha = (sensoresNoPreto > 0);
 
       // =====================================================================
-      // GATILHO 1: ENTRADA DA SILVER TAPE (MOMENTO ESPECÍFICO)
-      // REGRA DE OURO: Só procura a silver tape se a linha preta SUMIR!
+      // GATILHO 1: AVALIAÇÃO DA SUSPEITA DE RESGATE (SILVER TAPE)
       // =====================================================================
-      static unsigned long tempoBloqueioCinza = 0;
-      
-      // Se não há preto (0) E a barra inteira está refletindo cinza (>=7)
-      if (sensoresNoPreto == 0 && sensoresNoCinza >= 7 && millis() > tempoBloqueioCinza) {
-        controlarRodas(0, 0); // Para o robô para ter certeza
-        delay(60);
+      static unsigned long tempoBrancoTotal = 0; // Filtro de bounce
 
-        uint16_t rD, gD, bD, cD, rE, gE, bE, cE;
-        tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
-        tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
+      if (suspeitaResgateAtiva) {
+        if (sensoresNoPreto >= 2) {
+          // Regra 2: Se após a intersecção o QTR detectar linha preta, a suspeita é descartada imediatamente.
+          suspeitaResgateAtiva = false;
+          tempoBrancoTotal = 0;
+          Serial.println(F("[DEBUG-RESGATE] Suspeita descartada! Linha preta encontrada."));
+        } else if (sensoresNoPreto == 0 && (millis() - tempoSuspeitaResgate < 1500)) {
+          // Regra 3: Branco total detectado.
+          // CORREÇÃO DE BUG: Adicionado um debounce de 150ms. Se for apenas o robô
+          // saindo da linha de raspão por causa da inércia da curva de 90 graus, ele não aborta.
+          if (tempoBrancoTotal == 0) tempoBrancoTotal = millis();
 
-        if (ehCinzaRGB(rD, gD, bD, cD, cinzaCalibradoDir) || ehCinzaRGB(rE, gE, bE, cE, cinzaCalibradoEsq)) {
-          // Confirmou! É o resgate!
-          estadoAtual = ESTADO_RESGATE;
-          modoResgate = RESGATE_ENTRANDO;
-          tempoInicioResgate = millis();
-          tempoEntradaResgate = millis();
-          votosSemParede = 0;
-          
-          tcaselect(CANAL_GY521); mpu.update();
-          anguloInicialResgate = mpu.getAngleZ();
-          
-          Serial.println(F("[RESGATE] Silver tape VALIDADA via RGB! Entrando na sala."));
-          break; // Vai pro resgate
+          if (millis() - tempoBrancoTotal > 150) {
+            estadoAtual = ESTADO_VALIDACAO_RESGATE;
+            modoValidacao = VALIDACAO_RE;
+            tempoInicioValidacao = millis();
+            suspeitaResgateAtiva = false; // Consome a suspeita
+            tempoBrancoTotal = 0;
+            Serial.println(F("[RESGATE] Suspeita confirmada por debounce! Iniciando validacao fisica."));
+            break; 
+          }
         } else {
-          // Era apenas uma sombra/reflexo no branco liso. RGB desmentiu.
-          tempoBloqueioCinza = millis() + 2000; // Bloqueia verificação por 2.0s
-          Serial.println(F("[CINZA] Falso Positivo descartado pelo RGB."));
+          tempoBrancoTotal = 0; // Zera se viu algo que não é 0 preto mas também não é >=2 (ex: 1 sensor apenas)
+          if (millis() - tempoSuspeitaResgate >= 1500) {
+            // Timeout de segurança se demorar demais
+            suspeitaResgateAtiva = false;
+            Serial.println(F("[DEBUG-RESGATE] Suspeita de resgate expirou por timeout."));
+          }
         }
       }
 
       // =====================================================================
-      // GATILHO 2: CRUZAMENTOS VERDE/VERMELHO (MOMENTO ESPECÍFICO)
+      // GATILHO 2: CRUZAMENTOS VERDE/VERMELHO E SUSPEITA DE RESGATE
       // =====================================================================
       static unsigned long tempoUltimoCruzamento = 0;
       if (sensoresNoPreto >= 4 && (millis() - tempoUltimoCruzamento > 1000)) {
@@ -210,6 +254,11 @@ void loop() {
         
         if (mudouEstado) {
           break; // Achou verde/vermelho, sai do case ESTADO_LINHA
+        } else {
+          // Regra 1: Passou por intersecção, NÃO leu verde, e seguiu reto.
+          // Inicia a suspeita de cinza (Silver Tape).
+          suspeitaResgateAtiva = true;
+          tempoSuspeitaResgate = millis();
         }
       }
 
@@ -231,8 +280,26 @@ void loop() {
 
       // =====================================================================
       // MÁQUINA DE ESTADOS DO PID (O Seguidor de Linha em si)
-      // Agora ele roda LIMPO, sem interrupções e travas no meio da pista
       // =====================================================================
+      
+      // DEBUG DO MODO LINHA
+      if (modoLinha != ultimoModoLinhaDebug) {
+        Serial.print(F("[DEBUG-LINHA] Mudanca de Modo: "));
+        Serial.print(getNomeModoLinha(ultimoModoLinhaDebug));
+        Serial.print(F(" -> "));
+        Serial.println(getNomeModoLinha(modoLinha));
+        ultimoModoLinhaDebug = modoLinha;
+      }
+
+      static unsigned long ultimoPrintPID = 0;
+      if (millis() - ultimoPrintPID > 500) {
+        ultimoPrintPID = millis();
+        Serial.print(F("[DEBUG-PID] Mod: ")); Serial.print(getNomeModoLinha(modoLinha));
+        Serial.print(F(" | Erro: ")); Serial.print(3500 - position);
+        Serial.print(F(" | Pretos: ")); Serial.print(sensoresNoPreto);
+        Serial.print(F(" | SuspeitaResgate: ")); Serial.println(suspeitaResgateAtiva ? "ATIVA" : "NAO");
+      }
+
       switch (modoLinha) {
         case SEGUINDO:
           if (!vendoLinha) { // O preto sumiu (Gap ou Quina)
@@ -294,6 +361,67 @@ void loop() {
           } else {
             contadorFalhas = 0;
             modoLinha = SEGUINDO;
+          }
+          break;
+      }
+      break;
+    }
+
+    case ESTADO_VALIDACAO_RESGATE: {
+      // Regra 5: Se durante qualquer momento da validação os sensores QTR detectarem linha preta, a validação é abortada.
+      uint16_t vIR[NUM_SENSORES_IR];
+      qtr.readLineBlack(vIR);
+      int sensoresNoPreto = 0;
+      for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+        if (vIR[i] > 650) sensoresNoPreto++;
+      }
+      
+      if (sensoresNoPreto >= 2) {
+        controlarRodas(0, 0);
+        estadoAtual = ESTADO_LINHA;
+        modoLinha = SEGUINDO; // Retorna instantaneamente para o estado de seguir linha
+        Serial.println(F("[VALIDACAO] Linha preta detectada! Falso positivo descartado."));
+        break;
+      }
+
+      switch (modoValidacao) {
+        case VALIDACAO_RE:
+          // Dá ré para alinhar o sensor RGB com a marca do cinza
+          if (millis() - tempoInicioValidacao < 250) { // Tempo estimado para a ré (~250ms)
+            controlarRodas(-100, -100); 
+          } else {
+            controlarRodas(0, 0); 
+            modoValidacao = VALIDACAO_RGB;
+            tempoInicioValidacao = millis();
+          }
+          break;
+
+        case VALIDACAO_RGB:
+          // Aguarda 100ms para estabilizar a inércia da parada antes de ler a cor
+          if (millis() - tempoInicioValidacao > 100) { 
+            uint16_t rD, gD, bD, cD, rE, gE, bE, cE;
+            tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
+            tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
+
+            // Regra 4: Validação rigorosa do cinza usando a calibração com margem apertada (+/- 100)
+            bool dirOk = ehCinzaRigoroso(rD, gD, bD, cD, cinzaCalibradoDir);
+            bool esqOk = ehCinzaRigoroso(rE, gE, bE, cE, cinzaCalibradoEsq);
+
+            if (dirOk || esqOk) {
+              Serial.println(F("[RESGATE] Silver tape VALIDADA rigorosamente!"));
+              estadoAtual = ESTADO_RESGATE;
+              modoResgate = RESGATE_ENTRANDO;
+              tempoInicioResgate = millis();
+              tempoEntradaResgate = millis();
+              votosSemParede = 0;
+              tcaselect(CANAL_GY521); mpu.update();
+              anguloInicialResgate = mpu.getAngleZ();
+            } else {
+              Serial.println(F("[VALIDACAO] Falso positivo RGB. Voltando para a linha."));
+              estadoAtual = ESTADO_LINHA;
+              modoLinha = GAP_AVANCA; // Retoma avançando levemente para sair da zona branca
+              tempoInicioGap = millis();
+            }
           }
           break;
       }
