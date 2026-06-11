@@ -62,8 +62,8 @@ enum EstadoRobo {
 // ==============================================================================
 // PARÂMETROS E CONSTANTES DE CONTROLE (PID E MOVIMENTO)
 // ==============================================================================
-const float KP = 0.06; // Constante Proporcional (Suavizado para evitar viradas bruscas)
-const float KD = 0.8;  // Constante Derivativa (Reduzido para não dar solavancos na leitura)
+const float KP = 0.15; // Constante Proporcional (Suavizado para evitar viradas bruscas)
+const float KD = 2.5;  // Constante Derivativa (Reduzido para não dar solavancos na leitura)
 const float KI = 0.0;  // Constante Integral (Geralmente 0 para seguidor de linha)
 
 const int VELOCIDADE_BASE = 120;

@@ -299,9 +299,9 @@ bool avaliarInterseccao() {
     if (verdeDir && verdeEsq) {
       tipoGiro = 180;
     } else if (verdeDir) {
-      tipoGiro = 70;
+      tipoGiro = 65;
     } else if (verdeEsq) {
-      tipoGiro = -70;
+      tipoGiro = -65;
     }
     
     // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
