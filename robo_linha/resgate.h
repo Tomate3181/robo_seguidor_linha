@@ -50,12 +50,22 @@ extern void pararMotores();
 // ==============================================================================
 
 // --- Validação da Silver Tape ---
-const int           VELOCIDADE_TESTE_SILVER   = 110;   // PWM de avanço durante os 250ms de validação
-const unsigned long TEMPO_VALIDACAO_SILVER     = 250;  // Janela de confirmação em ms
+const int           VELOCIDADE_TESTE_SILVER    = 110;  // PWM durante o avanço de validação (fase IR)
+const unsigned long TEMPO_VALIDACAO_SILVER      = 250; // Janela de confirmação IR em ms (fase 1)
+
+// --- Posicionamento RGB sobre a fita ---
+// Após a barra IR cravar todos os 8 sensores, o robô precisa avançar
+// TEMPO_POSICIONA_RGB ms a velocidade reduzida para que os sensores TCS34725
+// (montados levemente atrás da barra IR) fiquem fisicamente sobre a fita prata.
+// Este valor já está declarado em config.h como: const unsigned long TEMPO_POSICIONA_RGB = 200;
+
+const int           VELOCIDADE_POSICIONA_RGB   = 80;   // PWM reduzido durante o posicionamento
+
+// --- Fusão de Sensores: janela relativa ao Clear calibrado ---
+// Detalhada na FASE_FUSAO_SENSORES. Constantes FATOR_MIN_SILVER e FATOR_MAX_SILVER
+// estão definidas em config.h com base nos valores medidos (GAIN_4X, sensor a 3mm).
 
 // --- Filtro do Cruzamento em Cruz ---
-// Ao entrar em ZONA_RESGATE, o robô avança um pouco para sair completamente
-// da fita prata e checar se havia uma linha preta por baixo (cruzamento em +)
 const int           VELOCIDADE_FILTRO_CRUZ     = 100;  // PWM do avanço de confirmação
 const unsigned long TEMPO_FILTRO_CRUZ_MS       = 200;  // Duração do avanço (ms)
 const int           LIMIAR_IR_CRUZ             = 700;  // Valor mínimo para considerar "linha preta"
@@ -96,6 +106,40 @@ enum EstadoAbortoPorVerde {
 };
 
 // ==============================================================================
+// ENUMERAÇÃO DAS FASES INTERNAS DA VALIDAÇÃO DA SILVER TAPE
+// ==============================================================================
+//
+// A validação ocorre em 3 fases sequenciais não-bloqueantes:
+//
+//  FASE_IR_AVANCANDO  ──────────────────────────────────────────────────────
+//    O robô avança a VELOCIDADE_TESTE_SILVER durante TEMPO_VALIDACAO_SILVER ms.
+//    Nesse período, monitora:
+//      • Verde detectado pelo RGB → aborta para sub-FSM EstadoAbortoPorVerde
+//      • IR caiu abaixo de 5 sensores cravados → falso positivo → ESTADO_LINHA
+//    Se o tempo expirar sem aborto → conta sensores cravados:
+//      • Todos 8 → Silver tape confirmada → avança para FASE_POSICIONA_RGB
+//      • Menos de 8 → falso positivo → ESTADO_LINHA
+//
+//  FASE_POSICIONA_RGB  ─────────────────────────────────────────────────────
+//    O robô avança suavemente durante TEMPO_POSICIONA_RGB ms para que os
+//    sensores TCS34725 (fisicamente atrás da barra IR) fiquem sobre a fita.
+//    Continua monitorando verde. Ao expirar → FASE_FUSAO_SENSORES
+//
+//  FASE_FUSAO_SENSORES  ────────────────────────────────────────────────────
+//    Lê o canal Clear (luminosidade) de ambos os TCS34725.
+//    Aplica a condição de fusão dupla:
+//      |clearESQ - lumCinzaEsqCalibrado| ≤ TOLERANCIA_CINZA  AND
+//      |clearDIR - lumCinzaDirCalibrado| ≤ TOLERANCIA_CINZA
+//    → Ambos dentro da faixa: Silver Tape confirmada → ESTADO_ZONA_RESGATE
+//    → Pelo menos um fora:    Preto ou cruzamento    → ESTADO_LINHA
+//
+enum FaseValidacaoSilver {
+  FASE_IR_AVANCANDO,    // Fase 1: avanço + monitoramento IR + filtro de verde
+  FASE_POSICIONA_RGB,   // Fase 2: avanço para posicionar os TCS sobre a fita
+  FASE_FUSAO_SENSORES   // Fase 3: leitura dos TCS + decisão por fusão de sensores
+};
+
+// ==============================================================================
 // VARIÁVEIS DE ESTADO DO MÓDULO (escopo de arquivo — não poluem o global)
 // ==============================================================================
 
@@ -103,6 +147,8 @@ static EstadoResgate estadoResgate         = RES_AGUARDANDO_INICIO;
 
 // Validação da Silver Tape
 static unsigned long tempoInicioValidacao  = 0;
+static FaseValidacaoSilver faseValidacao   = FASE_IR_AVANCANDO; // Fase atual da validação
+static unsigned long tempoInicioPosiciona  = 0; // Timestamp de início do posicionamento RGB
 
 // -----------------------------------------------------------------------
 // Aborto por Verde: variáveis da sub-FSM não-bloqueante
@@ -110,10 +156,8 @@ static unsigned long tempoInicioValidacao  = 0;
 static EstadoAbortoPorVerde estadoAborto   = ABORTO_INATIVO;
 
 // Duração da ré de reposicionamento.
-// O robô avança a VELOCIDADE_TESTE_SILVER durante TEMPO_VALIDACAO_SILVER ms
-// no máximo. Usamos o tempo real que passou para calcular quanto recuar,
-// garantindo que ele volte aproximadamente para onde estava na borda do verde.
-static unsigned long tempoAvancadoMs       = 0; // ms efetivamente avançados antes do verde
+// Calculada em runtime como: (tempoAvancado * 90%) para compensar o avanço
+// feito antes da detecção de verde. O cálculo usa variável local por fase.
 static unsigned long tempoInicioAbortoRe   = 0; // timestamp de início da ré de reposicionamento
 static unsigned long duracaoReAborto       = 0; // ms de ré calculados para compensar o avanço
 
@@ -193,31 +237,43 @@ static int contarSensoresCentraisPretos() {
 /*
  * iniciarValidacaoSilverTape()
  * Chamada UMA VEZ pelo ESTADO_LINHA ao detectar ≥5 sensores cravados em 1000.
- * Salva o timestamp e transita para ESTADO_VALIDANDO_SILVER_TAPE.
+ * Reseta todas as variáveis de fase e transita para ESTADO_VALIDANDO_SILVER_TAPE.
  */
 inline void iniciarValidacaoSilverTape() {
   tempoInicioValidacao = millis();
-  estadoAtual = ESTADO_VALIDANDO_SILVER_TAPE;
-  Serial.println(F("[RESGATE] Possivel Silver Tape detectada. Iniciando validacao..."));
+  faseValidacao        = FASE_IR_AVANCANDO; // Começa pela fase de confirmação IR
+  estadoAborto         = ABORTO_INATIVO;    // Garante que nenhum aborto anterior ficou pendente
+  estadoAtual          = ESTADO_VALIDANDO_SILVER_TAPE;
+  Serial.println(F("[RESGATE] Possivel Silver Tape detectada. Iniciando validacao (Fase 1: IR)..."));
 }
 
 /*
  * executarValidacaoSilverTape()
  * Chamada a cada ciclo do loop() enquanto o robô está em ESTADO_VALIDANDO_SILVER_TAPE.
  *
- * LÓGICA:
- *   1. Mantém o robô avançando em linha reta (VELOCIDADE_TESTE_SILVER).
- *      Registra o tempo real de avanço para poder compensá-lo se houver aborto.
- *   2. A cada ciclo, monitora os sensores de cor RGB — sem bloquear o loop.
- *      Se VERDE for detectado: entra na sub-FSM de aborto (EstadoAbortoPorVerde)
- *      que executa de forma não-bloqueante:
- *        Fase ABORTO_RECUANDO       → ré proporcional ao avanço feito
- *        Fase ABORTO_LENDO_COR      → pausa de estabilização óptica (60ms)
- *        Fase ABORTO_PREPARANDO_GIRO → mini-avanço de alinhamento + captura do
- *                                       Yaw + seta tipoGiro → ESTADO_VERDE
- *   3. Após TEMPO_VALIDACAO_SILVER ms sem verde:
- *      - Todos os 8 IR cravados em 1000 → ESTADO_ZONA_RESGATE
- *      - Caso contrário → falso positivo → ESTADO_LINHA
+ * ┌─────────────────────────────────────────────────────────────────────────────┐
+ * │  FLUXO DA MÁQUINA DE VALIDAÇÃO (3 fases não-bloqueantes)                   │
+ * │                                                                             │
+ * │  FASE 1 — FASE_IR_AVANCANDO (0 → TEMPO_VALIDACAO_SILVER ms)               │
+ * │    • Avança a VELOCIDADE_TESTE_SILVER                                       │
+ * │    • A cada ciclo: monitora verde (aborto) e conta IR cravados              │
+ * │    • Verde detectado → sub-FSM EstadoAbortoPorVerde                         │
+ * │    • Ao expirar: todos 8 IR = 1000 → FASE 2 | caso contrário → LINHA       │
+ * │                                                                             │
+ * │  FASE 2 — FASE_POSICIONA_RGB (0 → TEMPO_POSICIONA_RGB ms)                 │
+ * │    • Avança a VELOCIDADE_POSICIONA_RGB (mais lento) para alinhar TCS       │
+ * │    • Continua monitorando verde                                             │
+ * │    • Ao expirar → FASE 3                                                    │
+ * │                                                                             │
+ * │  FASE 3 — FASE_FUSAO_SENSORES (executa uma única vez)                      │
+ * │    • Para os motores                                                        │
+ * │    • Lê Clear dos dois TCS34725                                             │
+ * │    • Condição de fusão dupla (AND):                                         │
+ * │        |clearESQ - lumCinzaEsqCalibrado| ≤ TOLERANCIA_CINZA                │
+ * │        |clearDIR - lumCinzaDirCalibrado| ≤ TOLERANCIA_CINZA                │
+ * │    • Ambos dentro → Silver confirmada → ESTADO_ZONA_RESGATE                │
+ * │    • Pelo menos um fora → preto/cruzamento → ESTADO_LINHA                  │
+ * └─────────────────────────────────────────────────────────────────────────────┘
  */
 inline void executarValidacaoSilverTape() {
 
@@ -235,10 +291,8 @@ inline void executarValidacaoSilverTape() {
       // ----------------------------------------------------------
       case ABORTO_RECUANDO:
         if (millis() - tempoInicioAbortoRe < duracaoReAborto) {
-          // Recua na mesma velocidade que avançou para espelhar o deslocamento
           controlarRodas(-VELOCIDADE_TESTE_SILVER, -VELOCIDADE_TESTE_SILVER);
         } else {
-          // Ré concluída — para e parte para a leitura
           controlarRodas(0, 0);
           tempoInicioPausaCor = millis();
           estadoAborto        = ABORTO_LENDO_COR;
@@ -248,13 +302,11 @@ inline void executarValidacaoSilverTape() {
 
       // ----------------------------------------------------------
       // Fase 2: Pausa para estabilização óptica (chassis parado)
-      // Equivalente ao delay(80) de avaliarInterseccao().
       // ----------------------------------------------------------
       case ABORTO_LENDO_COR: {
-        controlarRodas(0, 0); // Garante que está parado
+        controlarRodas(0, 0);
 
         if (millis() - tempoInicioPausaCor >= PAUSA_ESTABILIZACAO_COR_MS) {
-          // Lê os dois sensores TCS
           uint16_t rD, gD, bD, cD;
           uint16_t rE, gE, bE, cE;
 
@@ -267,7 +319,6 @@ inline void executarValidacaoSilverTape() {
           bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
 
           if (verdeDir || verdeEsq) {
-            // Verde confirmado após recuo: determina o tipo de giro
             if      (verdeDir && verdeEsq) tipoGiro =  180;
             else if (verdeDir)             tipoGiro =   65;
             else                           tipoGiro =  -65;
@@ -275,17 +326,14 @@ inline void executarValidacaoSilverTape() {
             Serial.print(F("[RESGATE-ABORTO] Verde confirmado. Tipo de giro: "));
             Serial.println(tipoGiro);
 
-            // Inicia o mini-avanço de alinhamento do eixo de rodas com o cruzamento
-            // (equivalente ao controlarRodas(100,100) + delay(150) de avaliarInterseccao)
             controlarRodas(VEL_MINI_AVANCO, VEL_MINI_AVANCO);
             tempoInicioMiniAvanco = millis();
             estadoAborto          = ABORTO_PREPARANDO_GIRO;
-
           } else {
-            // Cor sumiu após a ré (reflexo ou ruído): retorna para linha normalmente
             Serial.println(F("[RESGATE-ABORTO] Cor nao confirmada apos recuo. Retornando para linha."));
-            tempoInicioValidacao = 0; // Reseta timestamp para não re-disparar
+            tempoInicioValidacao = 0;
             estadoAborto         = ABORTO_INATIVO;
+            faseValidacao        = FASE_IR_AVANCANDO;
             ultimoErro           = 0;
             contadorFalhas       = 0;
             modoLinha            = SEGUINDO;
@@ -297,30 +345,22 @@ inline void executarValidacaoSilverTape() {
 
       // ----------------------------------------------------------
       // Fase 3: Mini-avanço de alinhamento + captura do Yaw
-      // Equivalente ao delay(150) + pararMotores() + delay(50)
-      // + mpu.update() + anguloInicial = ... de avaliarInterseccao().
       // ----------------------------------------------------------
       case ABORTO_PREPARANDO_GIRO:
         if (millis() - tempoInicioMiniAvanco < TEMPO_MINI_AVANCO_MS) {
           controlarRodas(VEL_MINI_AVANCO, VEL_MINI_AVANCO);
         } else {
-          // Alinhado — para, captura o Yaw e dispara o giro
           controlarRodas(0, 0);
 
-          // Pequena pausa passiva (não-bloqueante: o próximo ciclo já lê o Yaw)
-          // O MPU já é atualizado no topo do loop(), mas forçamos aqui para precisão
           tcaselect(CANAL_GY521);
           mpu.update();
           anguloInicial = mpu.getAngleZ();
 
-          // Bloqueia re-detecção de cor por 1.5 s (igual ao ESTADO_VERDE do .ino)
-          ultimaLeituraCor = millis() + 1500;
-
-          // Reseta variáveis da validação antes de sair
+          ultimaLeituraCor     = millis() + 1500;
           tempoInicioValidacao = 0;
           estadoAborto         = ABORTO_INATIVO;
+          faseValidacao        = FASE_IR_AVANCANDO;
 
-          // Transita para o giro — mesmo estado que avaliarInterseccao() usaria
           estadoAtual = ESTADO_VERDE;
           Serial.println(F("[RESGATE-ABORTO] Alinhado. Disparando ESTADO_VERDE."));
         }
@@ -331,65 +371,187 @@ inline void executarValidacaoSilverTape() {
         break;
     }
 
-    return; // Enquanto o aborto está em andamento, não executa o restante da função
+    return; // Enquanto o aborto está em andamento, não executa o restante
   }
 
   // ============================================================
-  // CAMINHO A: avanço normal de validação (aborto não ativo)
+  // CAMINHO A: fluxo normal de validação por fases
   // ============================================================
 
-  // Passo 1: registra quanto tempo o robô efetivamente avançou
-  // (usado para calcular a ré proporcional caso verde seja detectado)
-  tempoAvancadoMs = millis() - tempoInicioValidacao;
+  switch (faseValidacao) {
 
-  // Mantém avanço suave durante a janela de validação
-  controlarRodas(VELOCIDADE_TESTE_SILVER, VELOCIDADE_TESTE_SILVER);
+    // ------------------------------------------------------------------
+    // FASE 1: FASE_IR_AVANCANDO
+    // Avança durante TEMPO_VALIDACAO_SILVER ms confirmando que o IR mantém
+    // ≥5 sensores cravados (sinal de superfície altamente refletiva).
+    // Monitora verde a cada ciclo para aborto imediato.
+    // ------------------------------------------------------------------
+    case FASE_IR_AVANCANDO: {
 
-  // Passo 2: FILTRO CRÍTICO — monitora cor a cada ciclo
-  if (lerSensoresCor_verdeDetectado()) {
-    Serial.print(F("[RESGATE-ABORTO] Verde detectado apos "));
-    Serial.print(tempoAvancadoMs);
-    Serial.println(F("ms de avanco. Iniciando re proporcional..."));
+      // Mantém avanço suave durante a janela de validação IR
+      controlarRodas(VELOCIDADE_TESTE_SILVER, VELOCIDADE_TESTE_SILVER);
 
-    // Para imediatamente
-    controlarRodas(0, 0);
+      // --- FILTRO CRÍTICO: verde interrompe imediatamente ---
+      if (lerSensoresCor_verdeDetectado()) {
+        unsigned long tempoAvancadoMs = millis() - tempoInicioValidacao;
 
-    // Calcula quanto tempo de ré é necessário para compensar o avanço.
-    // Usa 90% do tempo avançado (margem de segurança: motores têm inércia).
-    duracaoReAborto    = (tempoAvancadoMs * 90UL) / 100UL;
+        Serial.print(F("[RESGATE-ABORTO] Verde detectado na Fase IR apos "));
+        Serial.print(tempoAvancadoMs);
+        Serial.println(F("ms. Iniciando re proporcional..."));
 
-    // Garante um mínimo de ré para não ficar estático se o avanço foi mínimo
-    if (duracaoReAborto < 40) duracaoReAborto = 40;
+        controlarRodas(0, 0);
 
-    tempoInicioAbortoRe  = millis();
-    estadoAborto         = ABORTO_RECUANDO;
-    // Não muda estadoAtual aqui: permanece em ESTADO_VALIDANDO_SILVER_TAPE
-    // até o aborto ser concluído e disparar ESTADO_VERDE ou ESTADO_LINHA.
-    return;
-  }
+        // Calcula ré proporcional ao avanço (90% do tempo avançado)
+        duracaoReAborto = (tempoAvancadoMs * 90UL) / 100UL;
+        if (duracaoReAborto < 40) duracaoReAborto = 40;
 
-  // Passo 3: Checagem final após a janela de 250ms
-  if (millis() - tempoInicioValidacao >= TEMPO_VALIDACAO_SILVER) {
+        tempoInicioAbortoRe = millis();
+        estadoAborto        = ABORTO_RECUANDO;
+        return;
+      }
 
-    // Força nova leitura dos sensores IR para decisão precisa
-    qtr.readLineBlack(sensorValues);
-    int cravados = contarSensoresCravados1000();
+      // --- Checagem ao final da janela de tempo ---
+      if (millis() - tempoInicioValidacao >= TEMPO_VALIDACAO_SILVER) {
 
-    if (cravados == NUM_SENSORES_IR) {
-      // TODOS os 8 sensores cravados: Silver Tape confirmada!
-      pararMotores();
-      tempoInicioValidacao = 0; // Reseta para não re-disparar
-      estadoResgate = RES_FILTRO_CRUZ;
-      estadoAtual   = ESTADO_ZONA_RESGATE;
-      Serial.println(F("[RESGATE] Silver Tape CONFIRMADA! Entrando na Zona de Resgate."));
-    } else {
-      // Nem todos cravados: era intersecção comum ou linha preta grossa
-      tempoInicioValidacao = 0;
-      estadoAtual = ESTADO_LINHA;
-      Serial.print(F("[RESGATE] Falso positivo (apenas "));
-      Serial.print(cravados);
-      Serial.println(F(" de 8 cravados). Retornando para linha."));
+        // Leitura precisa e atualizada dos sensores IR
+        qtr.readLineBlack(sensorValues);
+        int cravados = contarSensoresCravados1000();
+
+        if (cravados == NUM_SENSORES_IR) {
+          // Todos os 8 IR cravados: superfície totalmente refletiva confirmada.
+          // Avança para a Fase 2 para posicionar os TCS34725 sobre a fita.
+          Serial.println(F("[RESGATE] Fase 1 OK (8/8 IR). Avancando para posicionar RGB (Fase 2)..."));
+          tempoInicioPosiciona = millis();
+          faseValidacao        = FASE_POSICIONA_RGB;
+        } else {
+          // IR caiu: falso positivo (curva grossa, sujeira, etc.)
+          tempoInicioValidacao = 0;
+          faseValidacao        = FASE_IR_AVANCANDO;
+          estadoAtual          = ESTADO_LINHA;
+          Serial.print(F("[RESGATE] Fase 1 FALHOU (apenas "));
+          Serial.print(cravados);
+          Serial.println(F("/8 IR). Falso positivo. Retornando para linha."));
+        }
+      }
+      break;
     }
+
+    // ------------------------------------------------------------------
+    // FASE 2: FASE_POSICIONA_RGB
+    // Avança suavemente durante TEMPO_POSICIONA_RGB ms para que os
+    // sensores TCS34725 (montados atrás da barra IR) fiquem fisicamente
+    // sobre a fita prata. Continua monitorando verde para aborto.
+    // ------------------------------------------------------------------
+    case FASE_POSICIONA_RGB: {
+
+      // Avanço lento para posicionamento preciso
+      controlarRodas(VELOCIDADE_POSICIONA_RGB, VELOCIDADE_POSICIONA_RGB);
+
+      // --- Filtro de verde continua ativo nesta fase ---
+      if (lerSensoresCor_verdeDetectado()) {
+        unsigned long tempoTotal = (millis() - tempoInicioValidacao);
+
+        Serial.print(F("[RESGATE-ABORTO] Verde detectado na Fase RGB apos "));
+        Serial.print(tempoTotal);
+        Serial.println(F("ms totais. Iniciando re proporcional..."));
+
+        controlarRodas(0, 0);
+
+        // Recua o tempo total acumulado nas duas fases (IR + posicionamento)
+        duracaoReAborto = (tempoTotal * 90UL) / 100UL;
+        if (duracaoReAborto < 40) duracaoReAborto = 40;
+
+        tempoInicioAbortoRe = millis();
+        estadoAborto        = ABORTO_RECUANDO;
+        return;
+      }
+
+      // --- Posicionamento concluído: vai para a fusão de sensores ---
+      if (millis() - tempoInicioPosiciona >= TEMPO_POSICIONA_RGB) {
+        controlarRodas(0, 0); // Para antes da leitura para evitar blur óptico
+        Serial.println(F("[RESGATE] Fase 2 OK. Sensores RGB posicionados. Iniciando fusao (Fase 3)..."));
+        faseValidacao = FASE_FUSAO_SENSORES;
+        // A Fase 3 executa na próxima iteração do loop
+      }
+      break;
+    }
+
+    // ------------------------------------------------------------------
+    // FASE 3: FASE_FUSAO_SENSORES
+    // Lê o canal Clear dos dois TCS34725 e aplica a fusão por janela relativa.
+    //
+    // LÓGICA (derivada das medições reais com GAIN_4X a 3mm):
+    //
+    //   Superfície  | Clear ESQ | Clear DIR | Razão vs prata ESQ | Razão vs prata DIR
+    //   ------------|-----------|-----------|--------------------|-----------------
+    //   Preto       |    ~282   |    ~211   |       0.22x        |       0.25x
+    //   Silver Tape |   ~1297   |    ~829   |       1.00x        |       1.00x   ← alvo
+    //   Verde       |    ~721   |    ~501   |       0.56x        |       0.60x
+    //   Vermelho    |    ~715   |    ~487   |       0.55x        |       0.59x
+    //   Branco      |   ~4118   |   ~2605   |       3.17x        |       3.14x
+    //
+    //   Verde e vermelho ficam abaixo de 0.60x → já foram filtrados pelo
+    //   monitoramento contínuo de verde nas fases anteriores, mas a fusão
+    //   os rejeita por via de regra (Clear < FATOR_MIN_SILVER * ref).
+    //
+    //   CONDIÇÃO DE ACEITAÇÃO (AND em AMBOS os sensores):
+    //     Clear >= lumCalibrado * FATOR_MIN_SILVER  (0.45 → rejeita preto, verde, vermelho)
+    //     Clear <= lumCalibrado * FATOR_MAX_SILVER  (2.20 → rejeita branco puro)
+    //
+    //   Por que AND e não OR?
+    //     A prata cobre os dois sensores simultaneamente. Exigir concordância
+    //     de ambos elimina reflexos localizados (borda da fita, sujeira pontual).
+    // ------------------------------------------------------------------
+    case FASE_FUSAO_SENSORES: {
+
+      uint16_t rD, gD, bD, clearDIR;
+      uint16_t rE, gE, bE, clearESQ;
+
+      tcaselect(CANAL_TCS_DIR);
+      tcsDir.getRawData(&rD, &gD, &bD, &clearDIR);
+      tcaselect(CANAL_TCS_ESQ);
+      tcsEsq.getRawData(&rE, &gE, &bE, &clearESQ);
+
+      // Janela relativa ao valor calibrado em pista
+      uint16_t minDIR = (uint16_t)(lumCinzaDirCalibrado * FATOR_MIN_SILVER);
+      uint16_t maxDIR = (uint16_t)(lumCinzaDirCalibrado * FATOR_MAX_SILVER);
+      uint16_t minESQ = (uint16_t)(lumCinzaEsqCalibrado * FATOR_MIN_SILVER);
+      uint16_t maxESQ = (uint16_t)(lumCinzaEsqCalibrado * FATOR_MAX_SILVER);
+
+      bool dirOK = (clearDIR >= minDIR) && (clearDIR <= maxDIR);
+      bool esqOK = (clearESQ >= minESQ) && (clearESQ <= maxESQ);
+
+      // Debug compacto para Serial Monitor em pista
+      Serial.print(F("[FUSAO] DIR C=")); Serial.print(clearDIR);
+      Serial.print(F(" janela=[")); Serial.print(minDIR); Serial.print(F(",")); Serial.print(maxDIR);
+      Serial.print(F("] ")); Serial.print(dirOK ? F("OK") : F("FAIL"));
+      Serial.print(F(" | ESQ C=")); Serial.print(clearESQ);
+      Serial.print(F(" janela=[")); Serial.print(minESQ); Serial.print(F(",")); Serial.print(maxESQ);
+      Serial.print(F("] ")); Serial.println(esqOK ? F("OK") : F("FAIL"));
+
+      if (dirOK && esqOK) {
+        pararMotores();
+        tempoInicioValidacao = 0;
+        faseValidacao        = FASE_IR_AVANCANDO;
+        estadoResgate        = RES_FILTRO_CRUZ;
+        estadoAtual          = ESTADO_ZONA_RESGATE;
+        Serial.println(F("[RESGATE] SILVER TAPE CONFIRMADA! Entrando na Zona de Resgate."));
+
+      } else {
+        tempoInicioValidacao = 0;
+        faseValidacao        = FASE_IR_AVANCANDO;
+        ultimoErro           = 0;
+        contadorFalhas       = 0;
+        modoLinha            = SEGUINDO;
+        estadoAtual          = ESTADO_LINHA;
+        Serial.println(F("[RESGATE] Fusao rejeitada. Retornando para linha."));
+      }
+      break;
+    }
+
+    default:
+      faseValidacao = FASE_IR_AVANCANDO;
+      break;
   }
 }
 

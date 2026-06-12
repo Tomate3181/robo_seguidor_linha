@@ -209,7 +209,11 @@ void loop() {
       // =====================================================================
       // GATILHO 1: SUSPEITA DE SILVER TAPE (ZONA DE RESGATE)
       // =====================================================================
-      if (sensoresCravados1000 >= 5) {
+      // CRÍTICO: exige TODOS os 8 sensores cravados em 1000 simultaneamente.
+      // Com >= 5 o gatilho disparava em qualquer curva preta larga (7 pretos
+      // vistos no log). A silver tape reflete 100% em todos os sensores — o
+      // preto nunca cravar os 8 ao mesmo tempo em condições normais de pista.
+      if (sensoresCravados1000 == NUM_SENSORES_IR) {
         iniciarValidacaoSilverTape();
         break; // Quebra a execução atual e transiciona imediatamente
       }

@@ -79,6 +79,42 @@ const int VELOCIDADE_MAX = 255;
 const int VELOCIDADE_GAP = 130;
 const int TEMPO_PARA_12CM = 1200; // Tempo em ms para andar 12cm
 
+// ==============================================================================
+// CALIBRAÇÃO DE LUMINOSIDADE DA SILVER TAPE (Sensores RGB TCS34725)
+// ==============================================================================
+// Configuração de hardware: GAIN_4X, INTEGRATIONTIME_24MS, sensor a ~3mm do chão.
+//
+// Valores medidos (referência para ajuste dos thresholds abaixo):
+//   Preto:        ESQ C~282,  DIR C~211
+//   Silver Tape:  ESQ C~1297, DIR C~829
+//   Verde:        ESQ C~721,  DIR C~501
+//   Vermelho:     ESQ C~715,  DIR C~487
+//   Branco:       ESQ C~4118, DIR C~2605
+//
+// Definições concretas ficam em sensores.h (lumCinzaEsqCalibrado / lumCinzaDirCalibrado).
+//
+// LÓGICA DE FUSÃO DA SILVER TAPE (detalhada em resgate.h):
+//   Aceita quando AMBOS os sensores satisfazem:
+//     Clear >= lumCalibrado * FATOR_MIN_SILVER      (não é preto: prata ~4.6x acima do preto)
+//     Clear <= lumCalibrado * FATOR_MAX_SILVER      (não é branco: prata ~3.2x abaixo do branco)
+// ==============================================================================
+
+// Fração mínima do Clear calibrado para aceitar como prata (exclui preto e sujeira)
+// Prata ~1297, preto ~282 → razão 4.6x. Threshold 0.45 → aceita a partir de ~584.
+// Margem generosa para variação de luz ambiente (±30%).
+const float FATOR_MIN_SILVER = 0.45f;
+
+// Fração máxima do Clear calibrado para aceitar como prata (exclui branco puro)
+// Prata ~1297, branco ~4118 → razão 3.2x. Threshold 2.2 → rejeita acima de ~2853.
+// Protege contra sensor sobre o branco do piso da arena.
+const float FATOR_MAX_SILVER = 2.2f;
+
+// Tempo (ms) de avanço para posicionar os sensores RGB sobre a fita antes da leitura
+const unsigned long TEMPO_POSICIONA_RGB = 200;
+
+// Mantido por compatibilidade (não usado na lógica nova de fusão)
+const int TOLERANCIA_CINZA = 60;
+
 
 
 // ==============================================================================

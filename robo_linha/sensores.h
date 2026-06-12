@@ -17,6 +17,13 @@ QTRSensors qtr;
 uint16_t sensorValues[NUM_SENSORES_IR];
 
 // Objetos dos sensores RGB TCS34725
+// INTEGRATIONTIME_24MS + GAIN_4X: configuração calibrada para sensor a ~3mm do chão.
+// Com esses parâmetros os valores medidos foram:
+//   Preto:       ESQ C~282  | DIR C~211
+//   Silver Tape: ESQ C~1297 | DIR C~829
+//   Verde:       ESQ C~721  | DIR C~501
+//   Vermelho:    ESQ C~715  | DIR C~487
+//   Branco:      ESQ C~4118 | DIR C~2605
 Adafruit_TCS34725 tcsDir = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 Adafruit_TCS34725 tcsEsq = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 
@@ -31,9 +38,35 @@ NewPing sonarDir(PINO_TRIG_DIR, PINO_ECHO_DIR, MAX_DISTANCE);
 // Variável para controle não-bloqueante de leitura de cor
 unsigned long ultimaLeituraCor = 0;
 
-// Variáveis dinâmicas para calibração de luminosidade (ignorar sombras)
-uint16_t limiarLuminosidadeDir = 80;
-uint16_t limiarLuminosidadeEsq = 80;
+// ==============================================================================
+// LIMIAR MÍNIMO DE LUMINOSIDADE PARA LEITURAS DE COR (Verde / Vermelho)
+// ==============================================================================
+// Com GAIN_4X a 3mm:
+//   Preto:    ESQ C~282, DIR C~211  → abaixo do limiar → ignora cor
+//   Verde:    ESQ C~721, DIR C~501  → acima do limiar → processa cor
+//   Vermelho: ESQ C~715, DIR C~487  → acima do limiar → processa cor
+// Limiar definido a ~60% do Clear mínimo das cores úteis:
+//   DIR: 487 * 0.6 ≈ 292 → arredondado para 300 (acima do preto DIR ~211)
+//   ESQ: 715 * 0.6 ≈ 429 → arredondado para 400 (acima do preto ESQ ~282)
+// ==============================================================================
+uint16_t limiarLuminosidadeDir = 300;
+uint16_t limiarLuminosidadeEsq = 400;
+
+// ==============================================================================
+// CALIBRAÇÃO DE LUMINOSIDADE DA SILVER TAPE (canal Clear do TCS34725)
+// ==============================================================================
+// Valores-padrão medidos com sensor a ~3mm do chão, GAIN_4X, 24ms:
+//   Preto:        ESQ C~282,  DIR C~211
+//   Silver Tape:  ESQ C~1297, DIR C~829   ← referência desta calibração
+//   Verde:        ESQ C~721,  DIR C~501
+//   Vermelho:     ESQ C~715,  DIR C~487
+//   Branco:       ESQ C~4118, DIR C~2605
+//
+// A prata está ~4.6x acima do preto e ~3.2x abaixo do branco.
+// Sobrescritos em executarCalibracao() Fase 3 ao vivo.
+// ==============================================================================
+int lumCinzaEsqCalibrado = 1297; // Clear do sensor ESQ sobre a silver tape
+int lumCinzaDirCalibrado = 829;  // Clear do sensor DIR sobre a silver tape
 
 // ESTRUTURA PARA SALVAR A ASSINATURA RGB DO VERDE CALIBRADO
 struct AssinaturaCor {
@@ -105,28 +138,42 @@ void esperarBotao() {
 }
 
 // ==============================================================================
-// LÓGICA DE VALIDAÇÃO DE CORES
+// DETECÇÃO DE VERMELHO
 // ==============================================================================
-
+// Dados medidos (GAIN_4X, sensor a 3mm):
+//   Vermelho: ESQ R=462 G=170 B=130  |  DIR R=326 G=111 B=92
+//   Razão R/G: ESQ=2.72, DIR=2.94  →  threshold conservador: R > G * 1.8
+//   Razão R/B: ESQ=3.55, DIR=3.54  →  threshold conservador: R > B * 2.0
+//
+// Preto (C~282) e branco (C~4118): Clear > limiarC filtra ambos.
+// Verde: G domina → R < G → rejeita automaticamente pela condição R > G*1.8.
+// ==============================================================================
 bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
-  if (c < limiarC) return false;  
-  if (r < 80) return false; 
-  float margem = 1.35; 
-  if (r > (g * margem) && r > (b * margem)) return true; 
+  // Rejeita escuro (preto, sombra)
+  if (c < limiarC) return false;
+
+  // R deve dominar com boa margem sobre G e B
+  // Threshold 1.8x (conservador vs 2.72x medido) → cobre variações de iluminação
+  if (r > (g * 1.8f) && r > (b * 2.0f)) return true;
+
   return false;
 }
 
+// ==============================================================================
+// CÁLCULO DE HUE (Matiz) — usado por ehVerde()
+// Converte RGB normalizado para ângulo de matiz [0°, 360°]
+// ==============================================================================
 float calcularHue(float r, float g, float b) {
   float maxVal = max(r, max(g, b));
   float minVal = min(r, min(g, b));
-  float delta = maxVal - minVal;
+  float delta  = maxVal - minVal;
   if (delta == 0) return 0;
-  
+
   float hue = 0;
-  if (maxVal == r) hue = 60.0 * ((g - b) / delta);
-  else if (maxVal == g) hue = 60.0 * ((b - r) / delta + 2.0);
-  else if (maxVal == b) hue = 60.0 * ((r - g) / delta + 4.0);
-  if (hue < 0) hue += 360.0;
+  if      (maxVal == r) hue = 60.0f * ((g - b) / delta);
+  else if (maxVal == g) hue = 60.0f * ((b - r) / delta + 2.0f);
+  else                  hue = 60.0f * ((r - g) / delta + 4.0f);
+  if (hue < 0) hue += 360.0f;
   return hue;
 }
 
@@ -138,37 +185,47 @@ float calcularSaturacao(float r, float g, float b) {
 }
 
 // ==============================================================================
-// LÓGICA DE VALIDAÇÃO DE CORES SUPER RIGOROSA (Sem falso positivo)
+// DETECÇÃO DE VERDE
+// ==============================================================================
+// Dados medidos (GAIN_4X, sensor a 3mm):
+//   Verde: ESQ R=151 G=426 B=168  |  DIR R=124 G=279 B=124
+//   Razão G/R: ESQ=2.82, DIR=2.25  →  threshold conservador: G > R * 1.8
+//   Razão G/B: ESQ=2.54, DIR=2.25  →  threshold conservador: G > B * 1.8
+//
+// Cinza/Silver: ESQ R=421 G=517 B=356  →  G/R=1.23, G/B=1.45
+//   → Não atinge G > R*1.8 → rejeita corretamente
+//
+// Branco: ESQ R=1297 G=1642 B=1059  →  G/R=1.27, G/B=1.55
+//   → Não atinge G > R*1.8 → rejeita corretamente
+//
+// Preto: Clear ~282 < limiarC → rejeita antes de calcular razões
+//
+// Hue do verde medido: ~118° (ESQ) e ~120° (DIR) → faixa [95°, 155°] cobre com margem
+// Saturação: ESQ=0.65, DIR=0.56 → threshold 0.4 rejeita brancos/cinzas (sat~0.2)
 // ==============================================================================
 bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
-  // Ignora escuro total ou sombras
+  // Rejeita escuro (preto, sombra)
   if (c < limiarC) return false;
-  
-  // Ignora lixo do sensor
-  if (g < 50 || c > 60000) return false;
-  
-  // REGRA DE OURO: No verde real, o 'G' TEM que ser a cor dominante. 
-  // Se R ou B forem maiores ou iguais ao G, não é verde (provavelmente é branco ou cinza)
-  if (r >= g || b >= g) return false;
-  
-  // O Verde tem que ser pelo menos 15% mais forte que o vermelho e o azul
-  if (g < (r * 1.15)) return false;
-  if (g < (b * 1.15)) return false;
 
-  float hue = calcularHue(r, g, b);
-  float sat = calcularSaturacao(r, g, b);
+  // Rejeita saturação de sensor (branco com muita luz, C acima de 65000)
+  if (c > 60000) return false;
 
-  // Range de Verde restrito
-  bool hueValido = (hue >= 90.0 && hue <= 170.0);
-  
-  // Aumentamos a saturação para 0.25 (O antigo 0.18 deixava o chão branco ser lido como verde)
-  bool satValida = (sat >= 0.25); 
+  // REGRA PRIMÁRIA: G deve dominar com margem clara sobre R e B
+  // Threshold 1.8x (conservador vs 2.25x mínimo medido)
+  // Isso rejeita cinza (G/R~1.23) e branco (G/R~1.27) automaticamente
+  if (g <= (r * 1.8f)) return false;
+  if (g <= (b * 1.8f)) return false;
 
-  if (hueValido && satValida) {
-    return true;
-  }
-  
-  return false;
+  // Confirmação por Hue: verde real fica entre 95° e 155°
+  float hue = calcularHue((float)r, (float)g, (float)b);
+  if (hue < 95.0f || hue > 155.0f) return false;
+
+  // Confirmação por saturação: verde tem saturação alta, cinza/branco têm baixa
+  // Verde medido: sat~0.56-0.65 | Cinza/Branco: sat~0.19-0.22
+  float sat = calcularSaturacao((float)r, (float)g, (float)b);
+  if (sat < 0.40f) return false;
+
+  return true;
 }
 
 // ==============================================================================
@@ -282,6 +339,58 @@ void executarCalibracao() {
   Serial.print(F("[ESQ] R:")); Serial.print(verdeCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoEsq.b);
 
   // ---------------------------------------------------------
+  // FASE 3: SILVER TAPE — Calibração da Luminosidade (Clear)
+  // ---------------------------------------------------------
+  // Coloque AMBOS os sensores RGB diretamente sobre a fita prata.
+  // O maior valor de Clear registrado durante a janela será salvo como
+  // referência. A tolerância (±TOLERANCIA_CINZA) é aplicada em runtime.
+  Serial.println(F("\n[FASE 3] Coloque os DOIS sensores RGB sobre a FITA PRATA (Silver Tape)."));
+  Serial.println(F("Mexa levemente para cobrir variações de superficie. APERTE O BOTÃO."));
+
+  uint16_t melhorClearEsq = 0;
+  uint16_t melhorClearDir = 0;
+
+  while (digitalRead(PINO_BOTAO) == HIGH) {
+    uint16_t r, g, b, c;
+
+    tcaselect(CANAL_TCS_DIR);
+    tcsDir.getRawData(&r, &g, &b, &c);
+    if (c > melhorClearDir) melhorClearDir = c;
+
+    tcaselect(CANAL_TCS_ESQ);
+    tcsEsq.getRawData(&r, &g, &b, &c);
+    if (c > melhorClearEsq) melhorClearEsq = c;
+
+    delay(10);
+  }
+  esperarBotao();
+
+  // Só sobrescreve se capturou algo razoável (> 50 counts = não estava tapado)
+  if (melhorClearDir > 50) {
+    lumCinzaDirCalibrado = (int)melhorClearDir;
+  }
+  if (melhorClearEsq > 50) {
+    lumCinzaEsqCalibrado = (int)melhorClearEsq;
+  }
+
+  Serial.println(F("--- CALIBRAÇÃO SILVER TAPE GRAVADA ---"));
+  Serial.print(F("[DIR] Clear calibrado: ")); Serial.println(lumCinzaDirCalibrado);
+  Serial.print(F("[ESQ] Clear calibrado: ")); Serial.println(lumCinzaEsqCalibrado);
+
+  // Imprime a última leitura de R/G/B para ajuste do LIMIAR_ACROMIA_SILVER
+  {
+    uint16_t r, g, b, c;
+    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&r, &g, &b, &c);
+    Serial.print(F("[DIR] R:")); Serial.print(r); Serial.print(F(" G:")); Serial.print(g);
+    Serial.print(F(" B:")); Serial.print(b); Serial.print(F(" -> acromia(max-min)="));
+    Serial.println(max(r, max(g, b)) - min(r, min(g, b)));
+    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&r, &g, &b, &c);
+    Serial.print(F("[ESQ] R:")); Serial.print(r); Serial.print(F(" G:")); Serial.print(g);
+    Serial.print(F(" B:")); Serial.print(b); Serial.print(F(" -> acromia(max-min)="));
+    Serial.println(max(r, max(g, b)) - min(r, min(g, b)));
+  }
+
+  // ---------------------------------------------------------
   // FASE 4: POSICIONAMENTO FINAL
   // ---------------------------------------------------------
   Serial.println(F("\n[FASE 4] Posicione o robô na LARGADA."));
@@ -293,10 +402,13 @@ void executarCalibracao() {
   delay(100);
   mpu.calcOffsets(true, true);
   
-  limiarLuminosidadeDir = maxCDir * 0.15; 
+  limiarLuminosidadeDir = maxCDir * 0.15;
   limiarLuminosidadeEsq = maxCEsq * 0.15;
-  if (limiarLuminosidadeDir < 40) limiarLuminosidadeDir = 40; 
-  if (limiarLuminosidadeEsq < 40) limiarLuminosidadeEsq = 40;
+  // Com GAIN_4X a 3mm, maxCDir (branco) ≈ 2605, maxCEsq ≈ 4118.
+  // 15% disso: DIR ≈ 390, ESQ ≈ 617 — acima do preto (DIR~211, ESQ~282)
+  // e abaixo do verde (DIR~501, ESQ~721). Garante piso mínimo de 300/400.
+  if (limiarLuminosidadeDir < 300) limiarLuminosidadeDir = 300;
+  if (limiarLuminosidadeEsq < 400) limiarLuminosidadeEsq = 400;
   
   if (verdeCalibradoDir.g == 0) { verdeCalibradoDir.r = 45; verdeCalibradoDir.g = 100; verdeCalibradoDir.b = 50; }
   if (verdeCalibradoEsq.g == 0) { verdeCalibradoEsq.r = 45; verdeCalibradoEsq.g = 100; verdeCalibradoEsq.b = 50; }
