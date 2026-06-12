@@ -4,6 +4,7 @@
 #include "motores.h"
 #include "sensores.h"
 #include "resgate.h"
+#include "obstaculo.h"  // Módulo de desvio por contorno circular
 
 // Variável global para armazenar o estado atual da Máquina de Estados Finitos (FSM)
 EstadoRobo estadoAtual = ESTADO_CALIBRACAO;
@@ -21,10 +22,12 @@ int tipoGiro = 0;
 float anguloInicial = 0;
 
 // Variáveis de desvio de obstáculo
-ModoObstaculo modoObstaculo = GIRO_INICIAL;
-float anguloInicialObstaculo = 0;
-unsigned long tempoInicioObstaculo = 0;
-int contadorContorno = 0;
+// ModoObstaculo, anguloInicialObstaculo, tempoInicioObstaculo, contadorContorno
+// foram removidos — toda a lógica e estado interno ficam em obstaculo.h.
+
+// Antiruído: contador de leituras consecutivas abaixo de 10 cm
+int contadorLeiturasFrontal = 0;
+
 unsigned long tempoUltimoSonar = 0;
 
 
@@ -37,12 +40,14 @@ ModoLinha ultimoModoLinhaDebug = SEGUINDO;
 
 String getNomeEstado(EstadoRobo e) {
   switch(e) {
-    case ESTADO_CALIBRACAO: return "CALIBRACAO";
-    case ESTADO_LINHA: return "LINHA";
-    case ESTADO_VERDE: return "VERDE";
-    case ESTADO_VERMELHO: return "VERMELHO";
-    case ESTADO_OBSTACULO: return "OBSTACULO";
-
+    case ESTADO_CALIBRACAO:          return "CALIBRACAO";
+    case ESTADO_LINHA:               return "LINHA";
+    case ESTADO_VERDE:               return "VERDE";
+    case ESTADO_VERMELHO:            return "VERMELHO";
+    case ESTADO_OBSTACULO_RE:        return "OBS_RE";
+    case ESTADO_OBSTACULO_GIRANDO:   return "OBS_GIRANDO";
+    case ESTADO_OBSTACULO_CONTORNO:  return "OBS_CONTORNO";
+    case ESTADO_OBSTACULO_BUSCA:     return "OBS_BUSCA";
     default: return "DESCONHECIDO";
   }
 }
@@ -221,18 +226,20 @@ void loop() {
       }
 
       // =====================================================================
-      // GATILHO 3: OBSTÁCULO FRONTAL (SONAR)
+      // GATILHO 3: OBSTÁCULO FRONTAL (SONAR) — com validação antiruído
+      // Regra: só aciona o desvio após 3 leituras consecutivas ≤ 10 cm.
+      // Isso elimina falsos positivos por reflexos, sujeira ou ruído elétrico.
       // =====================================================================
       if (millis() - tempoUltimoSonar > 50) {
         tempoUltimoSonar = millis();
         if (obterDistanciaFiltrada(sonarFrente) <= 10) {
-          controlarRodas(0, 0); 
-          modoObstaculo = GIRO_INICIAL;
-          tcaselect(CANAL_GY521); mpu.update();
-          anguloInicialObstaculo = mpu.getAngleZ();
-          tempoInicioObstaculo = millis();
-          estadoAtual = ESTADO_OBSTACULO;
-          break;
+          contadorLeiturasFrontal++;
+          if (contadorLeiturasFrontal >= LEITURAS_CONSECUTIVAS_OBS) {
+            contadorLeiturasFrontal = 0; // Zera para o próximo ciclo
+            iniciarDesvioObstaculo();    // Delega tudo ao módulo obstaculo.h
+          }
+        } else {
+          contadorLeiturasFrontal = 0; // Resetar se a leitura for maior que 10 cm
         }
       }
 
@@ -367,70 +374,25 @@ void loop() {
       controlarRodas(0, 0);
       break;
 
-    case ESTADO_OBSTACULO: {
-      switch (modoObstaculo) {
-        case GIRO_INICIAL: {
-          // Gira para a esquerda (convenção: Esquerda é positivo no MPU)
-          controlarRodas(-100, 100); 
-          float anguloAlvo = anguloInicialObstaculo + 90.0;
-          if (mpu.getAngleZ() >= anguloAlvo) {
-            controlarRodas(0, 0);
-            contadorContorno = 0;
-            modoObstaculo = CONTORNO_LATERAL;
-            tempoInicioObstaculo = millis();
-          }
-          // Timeout de segurança
-          if (millis() - tempoInicioObstaculo > 2500) {
-             modoObstaculo = CONTORNO_LATERAL; // Força avanço
-          }
-          break;
-        }
-        case CONTORNO_LATERAL: {
-          controlarRodas(100, 100); // Avança contornando
-          if (millis() - tempoUltimoSonar > 50) {
-            tempoUltimoSonar = millis();
-            int distD = obterDistanciaFiltrada(sonarDir);
-            if (distD > 30) {
-              contadorContorno++;
-              if (contadorContorno >= 3) { // Passou da quina do objeto
-                modoObstaculo = BUSCA_LINHA;
-                tempoInicioObstaculo = millis();
-              }
-            } else {
-              contadorContorno = 0; // Se voltou a ver a parede, zera
-            }
-          }
-          break;
-        }
-        case BUSCA_LINHA: {
-          // Curva reversa para a direita buscando a linha original
-          controlarRodas(120, 20); 
-          
-          uint16_t position = qtr.readLineBlack(sensorValues);
-          bool vendoLinha = false;
-          for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-            if (sensorValues[i] > 200) {
-              vendoLinha = true;
-              break;
-            }
-          }
-
-          if (vendoLinha) {
-            controlarRodas(0, 0);
-            ultimoErro = 0;
-            contadorFalhas = 0;
-            modoLinha = SEGUINDO;
-            estadoAtual = ESTADO_LINHA;
-          } else if (millis() - tempoInicioObstaculo > 6000) { 
-            // Perdeu totalmente a linha, segurança.
-            controlarRodas(0, 0);
-            estadoAtual = ESTADO_LINHA; // Retorna para tentar se achar
-          }
-          break;
-        }
-      }
+    case ESTADO_OBSTACULO_RE:
+      // Fase 1: Ré para abrir espaço antes do giro
+      executarRe();
       break;
-    }
+
+    case ESTADO_OBSTACULO_GIRANDO:
+      // Fase 2: Giro de 65° validado pelo Yaw do MPU6050
+      executarGiro65();
+      break;
+
+    case ESTADO_OBSTACULO_CONTORNO:
+      // Fase 3: Arco de contorno com malha fechada (sonar lateral)
+      executarContornoArco();
+      break;
+
+    case ESTADO_OBSTACULO_BUSCA:
+      // Fase 4: Busca da linha após timeout (contingência)
+      executarBuscaLinha();
+      break;
 
     case ESTADO_VALIDANDO_SILVER_TAPE:
       executarValidacaoSilverTape();

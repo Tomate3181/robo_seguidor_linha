@@ -140,34 +140,29 @@ float calcularSaturacao(float r, float g, float b) {
 // ==============================================================================
 // LÓGICA DE VALIDAÇÃO DE CORES SUPER RIGOROSA (Sem falso positivo)
 // ==============================================================================
-bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC, const AssinaturaCor& calibracao) {
+bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
   // Ignora escuro total ou sombras
   if (c < limiarC) return false;
   
   // Ignora lixo do sensor
   if (g < 50 || c > 60000) return false;
   
-  // REGRA DE OURO DA COR: O 'G' TEM que ser a cor dominante
+  // REGRA DE OURO: No verde real, o 'G' TEM que ser a cor dominante. 
+  // Se R ou B forem maiores ou iguais ao G, não é verde (provavelmente é branco ou cinza)
   if (r >= g || b >= g) return false;
+  
+  // O Verde tem que ser pelo menos 15% mais forte que o vermelho e o azul
+  if (g < (r * 1.15)) return false;
+  if (g < (b * 1.15)) return false;
 
   float hue = calcularHue(r, g, b);
   float sat = calcularSaturacao(r, g, b);
 
-  // Calcula o Hue e a Saturação da cor gravada no botão
-  float hueCalibrado = calcularHue(calibracao.r, calibracao.g, calibracao.b);
-  float satCalibrado = calcularSaturacao(calibracao.r, calibracao.g, calibracao.b);
-
-  // Distância do Matiz (considerando que é um círculo de 360 graus)
-  float diffHue = abs(hue - hueCalibrado);
-  if (diffHue > 180.0) diffHue = 360.0 - diffHue;
-
-  // Aceita o verde se o Matiz estiver até 35 graus de distância do que você gravou na calibração
-  bool hueValido = (diffHue <= 35.0);
+  // Range de Verde restrito
+  bool hueValido = (hue >= 90.0 && hue <= 170.0);
   
-  // Saturação dinâmica: O chão (branco/cinza) derruba muito a saturação.
-  // Exigimos no mínimo 0.20 absoluto, ou metade da saturação original gravada.
-  float minSat = max(0.20f, satCalibrado * 0.5f);
-  bool satValida = (sat >= minSat); 
+  // Aumentamos a saturação para 0.25 (O antigo 0.18 deixava o chão branco ser lido como verde)
+  bool satValida = (sat >= 0.25); 
 
   if (hueValido && satValida) {
     return true;
@@ -175,8 +170,6 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC, c
   
   return false;
 }
-
-
 
 // ==============================================================================
 // NOVA LEITURA DE CRUZAMENTO (Super Rápida - Não quebra as curvas de 90º)
@@ -192,8 +185,8 @@ bool avaliarInterseccao() {
   tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
   tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir, verdeCalibradoDir);
-  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq, verdeCalibradoEsq);
+  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
   
   // Se achou o verde, resolve a curva!
   if (verdeDir || verdeEsq) {

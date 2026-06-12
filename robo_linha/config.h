@@ -56,7 +56,15 @@ enum EstadoRobo {
   ESTADO_ZONA_RESGATE,
   ESTADO_VERDE,
   ESTADO_VERMELHO,
-  ESTADO_OBSTACULO
+
+  // -----------------------------------------------------------------------
+  // Estados do desvio de obstáculo (contorno circular)
+  // Cada estado representa uma fase distinta da manobra — veja obstaculo.h
+  // -----------------------------------------------------------------------
+  ESTADO_OBSTACULO_RE,       // Fase 1: Ré para abrir espaço antes do giro
+  ESTADO_OBSTACULO_GIRANDO,  // Fase 2: Giro de 65° validado pelo Yaw do MPU6050
+  ESTADO_OBSTACULO_CONTORNO, // Fase 3: Arco de contorno com malha fechada (sonar lateral)
+  ESTADO_OBSTACULO_BUSCA     // Fase 4: Busca da linha após timeout do contorno (contingência)
 };
 
 // ==============================================================================
@@ -83,10 +91,8 @@ enum ModoLinha {
   GAP_RE_AJUSTE
 };
 
-enum ModoObstaculo {
-  GIRO_INICIAL,
-  CONTORNO_LATERAL,
-  BUSCA_LINHA
-};
+// ModoObstaculo removido: a lógica de desvio foi promovida a estados
+// independentes da FSM principal (ESTADO_OBSTACULO_RE, _GIRANDO, etc.)
+// Toda a implementação está encapsulada em obstaculo.h.
 
 #endif // CONFIG_H
