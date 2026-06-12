@@ -52,11 +52,11 @@ const uint8_t PINOS_IR[NUM_SENSORES_IR] = {30, 31, 32, 33, 34, 35, 36, 37};
 enum EstadoRobo {
   ESTADO_CALIBRACAO,
   ESTADO_LINHA,
+  ESTADO_VALIDANDO_SILVER_TAPE,
+  ESTADO_ZONA_RESGATE,
   ESTADO_VERDE,
   ESTADO_VERMELHO,
-  ESTADO_OBSTACULO,
-  ESTADO_VALIDACAO_RESGATE, // Novo estado: Validação rigorosa da silver tape
-  ESTADO_RESGATE // Novo estado para a Zona de Resgate
+  ESTADO_OBSTACULO
 };
 
 // ==============================================================================
@@ -71,14 +71,7 @@ const int VELOCIDADE_MAX = 255;
 const int VELOCIDADE_GAP = 130;
 const int TEMPO_PARA_12CM = 1200; // Tempo em ms para andar 12cm
 
-// --- Parâmetros da Zona de Resgate (Wall-Following) ---
-const int VELOCIDADE_RESGATE = 110;          // Velocidade base na zona de resgate
-const int DISTANCIA_ALVO_PAREDE = 12;        // Distância alvo para a parede lateral (em cm)
-const int DISTANCIA_OBSTACULO_FRENTE = 14; // Aumentado de 15 para 18
-const int DISTANCIA_QUINA_PAREDE = 20;       // Distância a partir da qual a parede lateral sumiu (quina) (em cm)
-const float KP_PAREDE = 4.5;                 // Ganho proporcional do seguidor de parede
-const unsigned long TEMPO_AVANCO_QUINA = 300;  // Tempo para avançar após perder a parede para contornar a quina (em ms)
-const unsigned long TEMPO_MINIMO_RESGATE = 5000; // Tempo mínimo na zona de resgate para evitar re-gatilho na entrada (em ms)
+
 
 // ==============================================================================
 // MODOS DE OPERAÇÃO DA LINHA (Sub-estados Não-Bloqueantes)
@@ -90,22 +83,10 @@ enum ModoLinha {
   GAP_RE_AJUSTE
 };
 
-enum ModoValidacao {
-  VALIDACAO_RE,
-  VALIDACAO_RGB
-};
-
 enum ModoObstaculo {
   GIRO_INICIAL,
   CONTORNO_LATERAL,
   BUSCA_LINHA
-};
-
-enum ModoResgate {
-  RESGATE_ENTRANDO,         // Avanço inicial cego para cruzar a silver tape
-  RESGATE_SEGUINDO_PAREDE,  // Seguidor de parede proporcional
-  RESGATE_GIRANDO_ESQUERDA, // Giro de 90° à esquerda para desviar de parede frontal
-  RESGATE_GIRANDO_DIREITA   // Giro de 90° à direita para contornar quina externa
 };
 
 #endif // CONFIG_H

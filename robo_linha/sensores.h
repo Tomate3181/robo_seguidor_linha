@@ -46,9 +46,6 @@ struct AssinaturaCor {
 AssinaturaCor verdeCalibradoDir = {0, 0, 0, 0};
 AssinaturaCor verdeCalibradoEsq = {0, 0, 0, 0};
 
-AssinaturaCor cinzaCalibradoDir = {0, 0, 0, 0};
-AssinaturaCor cinzaCalibradoEsq = {0, 0, 0, 0};
-
 // Referências às variáveis globais em robo_linha.ino
 extern EstadoRobo estadoAtual;
 extern int tipoGiro;
@@ -143,29 +140,34 @@ float calcularSaturacao(float r, float g, float b) {
 // ==============================================================================
 // LÓGICA DE VALIDAÇÃO DE CORES SUPER RIGOROSA (Sem falso positivo)
 // ==============================================================================
-bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
+bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC, const AssinaturaCor& calibracao) {
   // Ignora escuro total ou sombras
   if (c < limiarC) return false;
   
   // Ignora lixo do sensor
   if (g < 50 || c > 60000) return false;
   
-  // REGRA DE OURO: No verde real, o 'G' TEM que ser a cor dominante. 
-  // Se R ou B forem maiores ou iguais ao G, não é verde (provavelmente é branco ou cinza)
+  // REGRA DE OURO DA COR: O 'G' TEM que ser a cor dominante
   if (r >= g || b >= g) return false;
-  
-  // O Verde tem que ser pelo menos 15% mais forte que o vermelho e o azul
-  if (g < (r * 1.15)) return false;
-  if (g < (b * 1.15)) return false;
 
   float hue = calcularHue(r, g, b);
   float sat = calcularSaturacao(r, g, b);
 
-  // Range de Verde restrito
-  bool hueValido = (hue >= 90.0 && hue <= 170.0);
+  // Calcula o Hue e a Saturação da cor gravada no botão
+  float hueCalibrado = calcularHue(calibracao.r, calibracao.g, calibracao.b);
+  float satCalibrado = calcularSaturacao(calibracao.r, calibracao.g, calibracao.b);
+
+  // Distância do Matiz (considerando que é um círculo de 360 graus)
+  float diffHue = abs(hue - hueCalibrado);
+  if (diffHue > 180.0) diffHue = 360.0 - diffHue;
+
+  // Aceita o verde se o Matiz estiver até 35 graus de distância do que você gravou na calibração
+  bool hueValido = (diffHue <= 35.0);
   
-  // Aumentamos a saturação para 0.25 (O antigo 0.18 deixava o chão branco ser lido como verde)
-  bool satValida = (sat >= 0.25); 
+  // Saturação dinâmica: O chão (branco/cinza) derruba muito a saturação.
+  // Exigimos no mínimo 0.20 absoluto, ou metade da saturação original gravada.
+  float minSat = max(0.20f, satCalibrado * 0.5f);
+  bool satValida = (sat >= minSat); 
 
   if (hueValido && satValida) {
     return true;
@@ -174,107 +176,6 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
   return false;
 }
 
-
-// ==============================================================================
-// VALIDAÇÃO CROMÁTICA DO CINZA RIGOROSA (Sem falso positivo - Margem exata)
-// ==============================================================================
-bool ehCinzaRigoroso(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {
-  if (calib.c == 0) return false; // Falha imediata se não houve calibração
-
-  // Regra 4: Aplica margem de +/- 100 na luminosidade calibrada (Clear)
-  int limiteSuperior = calib.c + 100;
-  int limiteInferior = (calib.c > 100) ? (calib.c - 100) : 0;
-
-  if (c < limiteInferior || c > limiteSuperior) {
-    return false; // Fora da margem de erro
-  }
-
-  // Verifica as proporções para garantir que a cor (cinza/branco) também bate com a calibração
-  float propR_atual = (float)r / c;
-  float propG_atual = (float)g / c;
-  float propB_atual = (float)b / c;
-
-  float propR_calib = (float)calib.r / calib.c;
-  float propG_calib = (float)calib.g / calib.c;
-  float propB_calib = (float)calib.b / calib.c;
-
-  const float TOLERANCIA = 0.20f; 
-
-  if (abs(propR_atual - propR_calib) > TOLERANCIA) return false;
-  if (abs(propG_atual - propG_calib) > TOLERANCIA) return false;
-  if (abs(propB_atual - propB_calib) > TOLERANCIA) return false;
-
-  return true; // Passou em todos os critérios rigorosos!
-}
-
-// ==============================================================================
-// VALIDAÇÃO CROMÁTICA DO CINZA (SILVER TAPE) OTIMIZADA
-// ==============================================================================
-bool ehCinzaRGB(uint16_t r, uint16_t g, uint16_t b, uint16_t c, AssinaturaCor &calib) {
-  
-  // CRITÉRIO 1: JANELA DE LUMINOSIDADE (Sua maior defesa contra o Ladrilho Branco)
-  // Ladrilho branco bate 600+. Silver tape fica em 200~300. Superfície preta < 100.
-  if (c < 120 || c > 500) return false; 
-
-  // CRITÉRIO 2: VALIDAÇÃO POR PERFIL (Baseado na calibração)
-  // Em vez de assumir R=G=B, calculamos a proporção de cada cor em relação à luminosidade total (C).
-  // Isso cria um "DNA" da cor que sobrevive a mudanças de iluminação.
-  if (calib.c > 0) {
-    float propR_atual = (float)r / c;
-    float propG_atual = (float)g / c;
-    float propB_atual = (float)b / c;
-
-    float propR_calib = (float)calib.r / calib.c;
-    float propG_calib = (float)calib.g / calib.c;
-    float propB_calib = (float)calib.b / calib.c;
-
-    // Tolerância de 25% de desvio em relação ao que foi calibrado (Silver tape sofre muita variação de ângulo)
-    const float TOLERANCIA = 0.25f; 
-
-    if (abs(propR_atual - propR_calib) > TOLERANCIA) return false;
-    if (abs(propG_atual - propG_calib) > TOLERANCIA) return false;
-    if (abs(propB_atual - propB_calib) > TOLERANCIA) return false;
-
-    return true; // Passou no teste contra a calibração!
-  } 
-  else {
-    // CRITÉRIO 3: FALLBACK (Se o competidor esquecer de calibrar o cinza)
-    // Apenas garantimos que não há uma cor gritando muito mais que as outras (ex: não é verde)
-    // O canal G costuma ser o maior no TCS34725, mas não pode ser o dobro do R ou B.
-    if (g > (r * 1.8) || g > (b * 1.8)) return false; 
-    if (r > (g * 1.5) || b > (g * 1.5)) return false;
-
-    return true;
-  }
-}
-
-
-// ==============================================================================
-// DETECÇÃO DE SILVER TAPE (IR) - BLINDADO CONTRA CURVAS E CRUZAMENTOS
-// ==============================================================================
-bool detectouSilverTape(uint16_t *valores) {
-  uint8_t sensoresNoCinza = 0;
-  uint8_t sensoresNoPreto = 0;
-
-  for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-    // O QTR retorna valores calibrados de 0 (branco) a 1000 (preto)
-    if (valores[i] > 800) {
-      sensoresNoPreto++; // Achou uma linha preta absoluta
-    } else if (valores[i] > 150) {
-      sensoresNoCinza++; // 150 a 800 -> Reflexão irregular da fita metálica
-    }
-  }
-
-  // REGRA: A fita prata é larga e não é totalmente preta.
-  // Exigimos que a MAIORIA da barra (>= 5) esteja no cinza,
-  // E que não exista uma linha preta nítida (<= 2 no preto).
-  // Isso impede disparos falsos em "T" (cruzamentos) e curvas agudas!
-  if (sensoresNoCinza >= 5 && sensoresNoPreto <= 2) {
-    return true; 
-  }
-  
-  return false;
-}
 
 
 // ==============================================================================
@@ -291,8 +192,8 @@ bool avaliarInterseccao() {
   tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
   tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
   
-  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir);
-  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq);
+  bool verdeDir = ehVerde(rD, gD, bD, cD, limiarLuminosidadeDir, verdeCalibradoDir);
+  bool verdeEsq = ehVerde(rE, gE, bE, cE, limiarLuminosidadeEsq, verdeCalibradoEsq);
   
   // Se achou o verde, resolve a curva!
   if (verdeDir || verdeEsq) {
@@ -386,32 +287,6 @@ void executarCalibracao() {
   Serial.println(F("--- MAPA DA ASSINATURA DO VERDE GRAVADA ---"));
   Serial.print(F("[DIR] R:")); Serial.print(verdeCalibradoDir.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoDir.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoDir.b);
   Serial.print(F("[ESQ] R:")); Serial.print(verdeCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(verdeCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(verdeCalibradoEsq.b);
-
-  // ---------------------------------------------------------
-  // FASE 3: GATILHO DA FITA CINZA (SILVER TAPE)
-  // ---------------------------------------------------------
-  Serial.println(F("\n[FASE 3] Coloque os DOIS sensores RGB sobre a fita CINZA (Silver Tape)."));
-  Serial.println(F("Mexa um pouquinho para ele pegar a cor, e APERTE O BOTÃO."));
-  
-  while (digitalRead(PINO_BOTAO) == HIGH) {
-    uint16_t rD, gD, bD, cD;
-    uint16_t rE, gE, bE, cE;
-    
-    tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
-    tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
-    
-    // Filtra ruído (escuro) e captura o cinza
-    if (cD > 80 && cE > 80) {
-      cinzaCalibradoDir.r = rD; cinzaCalibradoDir.g = gD; cinzaCalibradoDir.b = bD; cinzaCalibradoDir.c = cD;
-      cinzaCalibradoEsq.r = rE; cinzaCalibradoEsq.g = gE; cinzaCalibradoEsq.b = bE; cinzaCalibradoEsq.c = cE;
-    }
-    delay(10);
-  }
-  esperarBotao();
-  
-  Serial.println(F("--- MAPA DA ASSINATURA DO CINZA GRAVADA ---"));
-  Serial.print(F("[DIR] R:")); Serial.print(cinzaCalibradoDir.r); Serial.print(F(" G:")); Serial.print(cinzaCalibradoDir.g); Serial.print(F(" B:")); Serial.println(cinzaCalibradoDir.b);
-  Serial.print(F("[ESQ] R:")); Serial.print(cinzaCalibradoEsq.r); Serial.print(F(" G:")); Serial.print(cinzaCalibradoEsq.g); Serial.print(F(" B:")); Serial.println(cinzaCalibradoEsq.b);
 
   // ---------------------------------------------------------
   // FASE 4: POSICIONAMENTO FINAL

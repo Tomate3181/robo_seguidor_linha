@@ -3,6 +3,7 @@
 
 #include "motores.h"
 #include "sensores.h"
+#include "resgate.h"
 
 // Variável global para armazenar o estado atual da Máquina de Estados Finitos (FSM)
 EstadoRobo estadoAtual = ESTADO_CALIBRACAO;
@@ -26,21 +27,7 @@ unsigned long tempoInicioObstaculo = 0;
 int contadorContorno = 0;
 unsigned long tempoUltimoSonar = 0;
 
-// Variáveis do estado de resgate (Wall-Following e Navegação)
-ModoResgate modoResgate = RESGATE_ENTRANDO;
-unsigned long tempoInicioResgate = 0;
-float anguloInicialResgate = 0;
-unsigned long tempoEntradaResgate = 0;
-bool registrouAnguloDireita = false;
-float anguloGiroDireita = 0;
-// BUG #3b FIX: Extraída do escopo 'static' para poder ser resetada entre sub-estados
-int votosSemParede = 0;
 
-// Variáveis de Validação da Zona de Resgate
-bool suspeitaResgateAtiva = false;
-unsigned long tempoSuspeitaResgate = 0;
-ModoValidacao modoValidacao = VALIDACAO_RE;
-unsigned long tempoInicioValidacao = 0;
 
 // ==============================================================================
 // VARIÁVEIS E FUNÇÕES DE DEBUG
@@ -55,8 +42,7 @@ String getNomeEstado(EstadoRobo e) {
     case ESTADO_VERDE: return "VERDE";
     case ESTADO_VERMELHO: return "VERMELHO";
     case ESTADO_OBSTACULO: return "OBSTACULO";
-    case ESTADO_VALIDACAO_RESGATE: return "VALIDACAO_RESGATE";
-    case ESTADO_RESGATE: return "RESGATE";
+
     default: return "DESCONHECIDO";
   }
 }
@@ -197,8 +183,13 @@ void loop() {
       // Conta os sensores para tomar decisões lógicas ANTES do PID
       int sensoresNoPreto = 0;
       int sensoresNoCinza = 0;
+      int sensoresCravados1000 = 0;
 
       for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
+        if (sensorValues[i] == 1000) {
+          sensoresCravados1000++;
+        }
+        
         if (sensorValues[i] > 650) {
           sensoresNoPreto++; // Linha preta absoluta
         } else if (sensorValues[i] > 150) {
@@ -206,43 +197,15 @@ void loop() {
         }
       }
 
-      bool vendoLinha = (sensoresNoPreto > 0);
-
       // =====================================================================
-      // GATILHO 1: AVALIAÇÃO DA SUSPEITA DE RESGATE (SILVER TAPE)
+      // GATILHO 1: SUSPEITA DE SILVER TAPE (ZONA DE RESGATE)
       // =====================================================================
-      static unsigned long tempoBrancoTotal = 0; // Filtro de bounce
-
-      if (suspeitaResgateAtiva) {
-        if (sensoresNoPreto >= 2) {
-          // Regra 2: Se após a intersecção o QTR detectar linha preta, a suspeita é descartada imediatamente.
-          suspeitaResgateAtiva = false;
-          tempoBrancoTotal = 0;
-          Serial.println(F("[DEBUG-RESGATE] Suspeita descartada! Linha preta encontrada."));
-        } else if (sensoresNoPreto == 0 && (millis() - tempoSuspeitaResgate < 1500)) {
-          // Regra 3: Branco total detectado.
-          // CORREÇÃO DE BUG: Adicionado um debounce de 150ms. Se for apenas o robô
-          // saindo da linha de raspão por causa da inércia da curva de 90 graus, ele não aborta.
-          if (tempoBrancoTotal == 0) tempoBrancoTotal = millis();
-
-          if (millis() - tempoBrancoTotal > 150) {
-            estadoAtual = ESTADO_VALIDACAO_RESGATE;
-            modoValidacao = VALIDACAO_RE;
-            tempoInicioValidacao = millis();
-            suspeitaResgateAtiva = false; // Consome a suspeita
-            tempoBrancoTotal = 0;
-            Serial.println(F("[RESGATE] Suspeita confirmada por debounce! Iniciando validacao fisica."));
-            break; 
-          }
-        } else {
-          tempoBrancoTotal = 0; // Zera se viu algo que não é 0 preto mas também não é >=2 (ex: 1 sensor apenas)
-          if (millis() - tempoSuspeitaResgate >= 1500) {
-            // Timeout de segurança se demorar demais
-            suspeitaResgateAtiva = false;
-            Serial.println(F("[DEBUG-RESGATE] Suspeita de resgate expirou por timeout."));
-          }
-        }
+      if (sensoresCravados1000 >= 5) {
+        iniciarValidacaoSilverTape();
+        break; // Quebra a execução atual e transiciona imediatamente
       }
+
+      bool vendoLinha = (sensoresNoPreto > 0);
 
       // =====================================================================
       // GATILHO 2: CRUZAMENTOS VERDE/VERMELHO E SUSPEITA DE RESGATE
@@ -254,11 +217,6 @@ void loop() {
         
         if (mudouEstado) {
           break; // Achou verde/vermelho, sai do case ESTADO_LINHA
-        } else {
-          // Regra 1: Passou por intersecção, NÃO leu verde, e seguiu reto.
-          // Inicia a suspeita de cinza (Silver Tape).
-          suspeitaResgateAtiva = true;
-          tempoSuspeitaResgate = millis();
         }
       }
 
@@ -296,8 +254,7 @@ void loop() {
         ultimoPrintPID = millis();
         Serial.print(F("[DEBUG-PID] Mod: ")); Serial.print(getNomeModoLinha(modoLinha));
         Serial.print(F(" | Erro: ")); Serial.print(3500 - position);
-        Serial.print(F(" | Pretos: ")); Serial.print(sensoresNoPreto);
-        Serial.print(F(" | SuspeitaResgate: ")); Serial.println(suspeitaResgateAtiva ? "ATIVA" : "NAO");
+        Serial.print(F(" | Pretos: ")); Serial.println(sensoresNoPreto);
       }
 
       switch (modoLinha) {
@@ -361,67 +318,6 @@ void loop() {
           } else {
             contadorFalhas = 0;
             modoLinha = SEGUINDO;
-          }
-          break;
-      }
-      break;
-    }
-
-    case ESTADO_VALIDACAO_RESGATE: {
-      // Regra 5: Se durante qualquer momento da validação os sensores QTR detectarem linha preta, a validação é abortada.
-      uint16_t vIR[NUM_SENSORES_IR];
-      qtr.readLineBlack(vIR);
-      int sensoresNoPreto = 0;
-      for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-        if (vIR[i] > 650) sensoresNoPreto++;
-      }
-      
-      if (sensoresNoPreto >= 2) {
-        controlarRodas(0, 0);
-        estadoAtual = ESTADO_LINHA;
-        modoLinha = SEGUINDO; // Retorna instantaneamente para o estado de seguir linha
-        Serial.println(F("[VALIDACAO] Linha preta detectada! Falso positivo descartado."));
-        break;
-      }
-
-      switch (modoValidacao) {
-        case VALIDACAO_RE:
-          // Dá ré para alinhar o sensor RGB com a marca do cinza
-          if (millis() - tempoInicioValidacao < 250) { // Tempo estimado para a ré (~250ms)
-            controlarRodas(-100, -100); 
-          } else {
-            controlarRodas(0, 0); 
-            modoValidacao = VALIDACAO_RGB;
-            tempoInicioValidacao = millis();
-          }
-          break;
-
-        case VALIDACAO_RGB:
-          // Aguarda 100ms para estabilizar a inércia da parada antes de ler a cor
-          if (millis() - tempoInicioValidacao > 100) { 
-            uint16_t rD, gD, bD, cD, rE, gE, bE, cE;
-            tcaselect(CANAL_TCS_DIR); tcsDir.getRawData(&rD, &gD, &bD, &cD);
-            tcaselect(CANAL_TCS_ESQ); tcsEsq.getRawData(&rE, &gE, &bE, &cE);
-
-            // Regra 4: Validação rigorosa do cinza usando a calibração com margem apertada (+/- 100)
-            bool dirOk = ehCinzaRigoroso(rD, gD, bD, cD, cinzaCalibradoDir);
-            bool esqOk = ehCinzaRigoroso(rE, gE, bE, cE, cinzaCalibradoEsq);
-
-            if (dirOk || esqOk) {
-              Serial.println(F("[RESGATE] Silver tape VALIDADA rigorosamente!"));
-              estadoAtual = ESTADO_RESGATE;
-              modoResgate = RESGATE_ENTRANDO;
-              tempoInicioResgate = millis();
-              tempoEntradaResgate = millis();
-              votosSemParede = 0;
-              tcaselect(CANAL_GY521); mpu.update();
-              anguloInicialResgate = mpu.getAngleZ();
-            } else {
-              Serial.println(F("[VALIDACAO] Falso positivo RGB. Voltando para a linha."));
-              estadoAtual = ESTADO_LINHA;
-              modoLinha = GAP_AVANCA; // Retoma avançando levemente para sair da zona branca
-              tempoInicioGap = millis();
-            }
           }
           break;
       }
@@ -536,189 +432,13 @@ void loop() {
       break;
     }
 
-    case ESTADO_RESGATE: {
-      static unsigned long tempoUltimoSonarResgate = 0;
-      static int distFrente = MAX_DISTANCE;
-      static int distDir = MAX_DISTANCE;
-      
-      if (millis() - tempoUltimoSonarResgate > 50) {
-        tempoUltimoSonarResgate = millis();
-        distFrente = obterDistanciaFiltrada(sonarFrente);
-        distDir = obterDistanciaFiltrada(sonarDir);
-      }
-      
-      if (tempoEntradaResgate == 0) {
-        tempoEntradaResgate = millis();
-      }
-      
-      // =====================================================================
-      // VALIDAÇÃO DA SAÍDA DO RESGATE (EXCLUSIVA VIA IR - MAIS VELOZ)
-      // =====================================================================
-      if (millis() - tempoEntradaResgate > TEMPO_MINIMO_RESGATE) {
-        uint16_t vIR[NUM_SENSORES_IR];
-        qtr.readLineBlack(vIR);
-        int sensoresNaLinha = 0;
-        for (uint8_t i = 0; i < NUM_SENSORES_IR; i++) {
-          if (vIR[i] > 650) { 
-            sensoresNaLinha++;
-          }
-        }
-        
-        // Se o IR identificou uma linha preta sólida (pelo menos 2 sensores na linha)
-        if (sensoresNaLinha >= 2) { 
-          ultimoErro = 0;
-          contadorFalhas = 0;
-          modoLinha = SEGUINDO;
-          estadoAtual = ESTADO_LINHA;
-          tempoEntradaResgate = 0; 
-          Serial.println(F("[RESGATE] Saida detectada via IR! Voltando pra linha."));
-          break;
-        }
-      }
-      
-      // 4. Execução dos sub-estados da navegação do resgate
-      switch (modoResgate) {
-        case RESGATE_ENTRANDO: {
-          controlarRodas(VELOCIDADE_RESGATE, VELOCIDADE_RESGATE);
-          
-          unsigned long tempoDecorrido = millis() - tempoInicioResgate;
-          // Ignora sensores nos primeiros 800ms para cruzar a silver tape totalmente
-          if (tempoDecorrido > 800) {
-            if (distFrente <= 18) {
-              controlarRodas(-90, -90); // Dá uma pequena ré de 100ms para não raspar o bico girando
-              delay(100); 
-              controlarRodas(0, 0);
-              tcaselect(CANAL_GY521); mpu.update();
-              anguloInicialResgate = mpu.getAngleZ();
-              tempoInicioResgate = millis();
-              modoResgate = RESGATE_GIRANDO_ESQUERDA;
-            }
-            else if (distDir <= 25) { // Tolerância para "pegar" a parede lateral
-              votosSemParede = 0; // BUG #3b FIX: Garante contador limpo ao entrar
-              modoResgate = RESGATE_SEGUINDO_PAREDE;
-            }
-            // BUG #3 FIX: Timeout reduzido de 2500ms para 1500ms.
-            // 2500ms era tempo demais parado sem encontrar parede → robô andava muito longe.
-            else if (tempoDecorrido > 1500) {
-              votosSemParede = 0; // BUG #3b FIX: Garante contador limpo ao entrar
-              modoResgate = RESGATE_SEGUINDO_PAREDE;
-            }
-          }
-          break;
-        }
-        
-        case RESGATE_SEGUINDO_PAREDE: {
-          // A: Parede frontal à vista -> parar e iniciar giro de 90° à esquerda
-          if (distFrente <= DISTANCIA_OBSTACULO_FRENTE) {
-            controlarRodas(0, 0);
-            tcaselect(CANAL_GY521); mpu.update();
-            anguloInicialResgate = mpu.getAngleZ();
-            tempoInicioResgate = millis();
-            modoResgate = RESGATE_GIRANDO_ESQUERDA;
-            break;
-          }
-          
-          // B: Parede lateral direita sumiu -> iniciar contorno de quina externa
-          // BUG #3b FIX: votosSemParede agora é variável global (linha ~37)
-          // para poder ser resetada ao transitar de RESGATE_ENTRANDO para cá.
-          if (distDir > DISTANCIA_QUINA_PAREDE) {
-            votosSemParede++; // Filtro de ruído do Sonar
-          } else {
-            votosSemParede = 0;
-          }
-
-          if (votosSemParede >= 3) { // Só gira se confirmar 3 vezes que a parede sumiu!
-            votosSemParede = 0;
-            tempoInicioResgate = millis();
-            registrouAnguloDireita = false; 
-            modoResgate = RESGATE_GIRANDO_DIREITA;
-            break;
-          }
-          
-          // C: Controle Proporcional (Wall-Following)
-          int erroParede = distDir - DISTANCIA_ALVO_PAREDE;
-          
-          // TRAVA DE SEGURANÇA: Limita o erro máximo. 
-          // Impede solavancos violentos caso o sonar falhe e leia 60cm do nada.
-          erroParede = constrain(erroParede, -10, 10); 
-          
-          int ajuste = erroParede * KP_PAREDE;
-          
-          controlarRodas(VELOCIDADE_RESGATE - ajuste, VELOCIDADE_RESGATE + ajuste);
-          break;
-        }
-        
-        case RESGATE_GIRANDO_ESQUERDA: {
-          // BUG #4 FIX: Giro com controle PROPORCIONAL (igual ao ESTADO_VERDE).
-          // A velocidade fixa 90 causava overshoot físico — o chassi continuava
-          // girando por inércia mesmo depois do código parar os motores.
-          // Com velocidade proporcional, o robô desacelera ao se aproximar do alvo.
-          float anguloAlvo  = anguloInicialResgate + 88.0; // 88° para compensar inércia
-          float anguloAtual = mpu.getAngleZ();
-          float erroAngulo  = anguloAlvo - anguloAtual;
-          
-          if (erroAngulo > 2.0) {
-            // Velocidade proporcional: rápido longe, lento perto
-            // Mínimo 60 para ter torque suficiente; máximo 130 para evitar inércia
-            int velGiro = constrain(60 + (int)(erroAngulo * 2.0), 60, 130);
-            controlarRodas(velGiro, -velGiro); // Anti-horário = esquerda
-          } else {
-            // Atingiu o ângulo alvo!
-            controlarRodas(0, 0);
-            votosSemParede = 0; // Reseta contador ao entrar no seguidor de parede
-            modoResgate = RESGATE_SEGUINDO_PAREDE;
-            Serial.println(F("[RESGATE] Giro a esquerda finalizado."));
-          }
-          
-          // Timeout de emergência (mantido para segurança)
-          if (millis() - tempoInicioResgate > 2500) {
-            controlarRodas(0, 0);
-            votosSemParede = 0;
-            modoResgate = RESGATE_SEGUINDO_PAREDE;
-            Serial.println(F("[RESGATE] Timeout no giro a esquerda!"));
-          }
-          break;
-        }
-        
-        case RESGATE_GIRANDO_DIREITA: {
-          unsigned long tempoDecorrido = millis() - tempoInicioResgate;
-          
-          if (tempoDecorrido < TEMPO_AVANCO_QUINA) {
-            // Fase 1: Avança reto para ultrapassar a quina fisicamente
-            controlarRodas(VELOCIDADE_RESGATE, VELOCIDADE_RESGATE);
-          } else {
-            // Fase 2: Gira no próprio eixo para a direita (convenção: horário é negativo no Yaw)
-            if (!registrouAnguloDireita) {
-              tcaselect(CANAL_GY521);
-              mpu.update();
-              anguloGiroDireita = mpu.getAngleZ();
-              registrouAnguloDireita = true;
-            }
-            
-            controlarRodas(-95, 95);
-            float anguloAlvo = anguloGiroDireita - 88.0;
-            
-            float anguloAtual = mpu.getAngleZ();
-            if (anguloAtual <= anguloAlvo) {
-              controlarRodas(0, 0);
-              registrouAnguloDireita = false;
-              modoResgate = RESGATE_SEGUINDO_PAREDE;
-              Serial.println(F("[RESGATE] Giro a direita finalizado."));
-            }
-            
-            // Timeout de emergência na Fase 2 (3 segundos extras)
-            if (tempoDecorrido > (TEMPO_AVANCO_QUINA + 3000)) {
-              controlarRodas(0, 0);
-              registrouAnguloDireita = false;
-              modoResgate = RESGATE_SEGUINDO_PAREDE;
-              Serial.println(F("[RESGATE] Timeout no giro a direita!"));
-            }
-          }
-          break;
-        }
-      }
+    case ESTADO_VALIDANDO_SILVER_TAPE:
+      executarValidacaoSilverTape();
       break;
-    }
+
+    case ESTADO_ZONA_RESGATE:
+      executarRotinaResgate();
+      break;
 
     default:
       estadoAtual = ESTADO_LINHA;
