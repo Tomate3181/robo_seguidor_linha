@@ -3,6 +3,8 @@
 
 #include "motores.h"
 #include "sensores.h"
+// ATENÇÃO: resgate.h deve ser incluído DEPOIS de sensores.h pois depende de
+// qtr, mpu, sonarFrente/Esq/Dir, tcsDir/Esq, ehVerde() e obterDistanciaFiltrada()
 #include "resgate.h"
 #include "obstaculo.h"  // Módulo de desvio por contorno circular
 
@@ -40,14 +42,16 @@ ModoLinha ultimoModoLinhaDebug = SEGUINDO;
 
 String getNomeEstado(EstadoRobo e) {
   switch(e) {
-    case ESTADO_CALIBRACAO:          return "CALIBRACAO";
-    case ESTADO_LINHA:               return "LINHA";
-    case ESTADO_VERDE:               return "VERDE";
-    case ESTADO_VERMELHO:            return "VERMELHO";
-    case ESTADO_OBSTACULO_RE:        return "OBS_RE";
-    case ESTADO_OBSTACULO_GIRANDO:   return "OBS_GIRANDO";
-    case ESTADO_OBSTACULO_CONTORNO:  return "OBS_CONTORNO";
-    case ESTADO_OBSTACULO_BUSCA:     return "OBS_BUSCA";
+    case ESTADO_CALIBRACAO:              return "CALIBRACAO";
+    case ESTADO_LINHA:                   return "LINHA";
+    case ESTADO_VERDE:                   return "VERDE";
+    case ESTADO_VERMELHO:                return "VERMELHO";
+    case ESTADO_VALIDANDO_SILVER_TAPE:   return "VALIDANDO_SILVER";
+    case ESTADO_ZONA_RESGATE:            return "ZONA_RESGATE";
+    case ESTADO_OBSTACULO_RE:            return "OBS_RE";
+    case ESTADO_OBSTACULO_GIRANDO:       return "OBS_GIRANDO";
+    case ESTADO_OBSTACULO_CONTORNO:      return "OBS_CONTORNO";
+    case ESTADO_OBSTACULO_BUSCA:         return "OBS_BUSCA";
     default: return "DESCONHECIDO";
   }
 }
