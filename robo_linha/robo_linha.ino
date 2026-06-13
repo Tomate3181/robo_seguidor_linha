@@ -17,6 +17,7 @@ int ultimoLado = 0;
 int ultimoErro = 0;
 int contadorFalhas = 0;
 unsigned long tempoInicioInsistir = 0;
+unsigned long tempoInicioConfirmarVermelho = 0;
 unsigned long tempoInicioGap = 0;
 
 // Variável para armazenar o tipo de giro determinado pelo sensor RGB
@@ -59,6 +60,7 @@ String getNomeEstado(EstadoRobo e) {
 String getNomeModoLinha(ModoLinha m) {
   switch(m) {
     case SEGUINDO: return "SEGUINDO";
+    case CONFIRMANDO_VERMELHO: return "CONF_VERMELHO"; // <--- ADICIONE ESTA LINHA
     case INSISTINDO: return "INSISTINDO";
     case GAP_AVANCA: return "GAP_AVANCA";
     case GAP_RE_AJUSTE: return "GAP_RE_AJUSTE";
@@ -126,7 +128,7 @@ void loop() {
     ultimoEstadoDebug = estadoAtual;
   }
   
-  // APLICAÇÃO: Verificação ativa contra travamento físico do barramento I2C
+  // APLICAÇÃO: Verificação activa contra travamento físico do barramento I2C
   if (Wire.getWireTimeoutFlag()) {
     Serial.println(F("[ALERTA] I2C travou por ruido! Forcando recuperacao..."));
     Wire.clearWireTimeoutFlag(); // Destrava limpando o erro interno
@@ -207,23 +209,21 @@ void loop() {
       }
 
       // =====================================================================
-      // GATILHO 1: SUSPEITA DE SILVER TAPE (ZONA DE RESGATE)
+      // GATILHO 1: SUSPEITA DE SILVER TAPE (ZONA DE RESGATE) - DESATIVADO
       // =====================================================================
-      // CRÍTICO: exige TODOS os 8 sensores cravados em 1000 simultaneamente.
-      // Com >= 5 o gatilho disparava em qualquer curva preta larga (7 pretos
-      // vistos no log). A silver tape reflete 100% em todos os sensores — o
-      // preto nunca cravar os 8 ao mesmo tempo em condições normais de pista.
-      if (sensoresCravados1000 == NUM_SENSORES_IR) {
-        iniciarValidacaoSilverTape();
-        break; // Quebra a execução atual e transiciona imediatamente
-      }
+      // if (sensoresCravados1000 == NUM_SENSORES_IR) {
+      //   iniciarValidacaoSilverTape();
+      //   break; // Quebra a execução atual e transiciona imediatamente
+      // }
 
       bool vendoLinha = (sensoresNoPreto > 0);
 
-      // =====================================================================
+// =====================================================================
       // GATILHO 2: CRUZAMENTOS VERDE/VERMELHO E SUSPEITA DE RESGATE
       // =====================================================================
       static unsigned long tempoUltimoCruzamento = 0;
+      static unsigned long tempoUltimaLeituraLateralPortal = 0;
+      
       if (sensoresNoPreto >= 4 && (millis() - tempoUltimoCruzamento > 1000)) {
         tempoUltimoCruzamento = millis();
         bool mudouEstado = avaliarInterseccao(); 
@@ -252,6 +252,41 @@ void loop() {
       }
 
       // =====================================================================
+      // GATILHO 4: ENTRADA NO RESGATE (PAREDE LATERAL PÓS-INTERSECÇÃO)
+      // =====================================================================
+      // Se o robô passou por uma intersecção preta recentemente (portal),
+      // está seguindo a linha reto e um dos sonares laterais detecta a parede 
+      // do portal do resgate, transiciona diretamente para a zona de resgate.
+      if (tempoUltimoCruzamento > 0 && 
+          (millis() - tempoUltimoCruzamento < JANELA_POS_CRUZAMENTO) &&
+          modoLinha == SEGUINDO) {
+        
+        // Amostragem controlada a cada 60ms para não reduzir a frequência do PID principal
+        if (millis() - tempoUltimaLeituraLateralPortal > 60) {
+          tempoUltimaLeituraLateralPortal = millis();
+
+          int distEsq = obterDistanciaFiltrada(sonarEsq);
+          int distDir = obterDistanciaFiltrada(sonarDir);
+
+          if (distEsq <= LIMIAR_PAREDE_PORTAL || distDir <= LIMIAR_PAREDE_PORTAL) {
+            Serial.print(F("[RESGATE] Parede do portal confirmada! Esq: "));
+            Serial.print(distEsq);
+            Serial.print(F(" cm | Dir: "));
+            Serial.print(distDir);
+            Serial.println(F(" cm. Iniciando rotina de resgate."));
+
+            controlarRodas(0, 0);
+            pararMotores();
+
+            // Configura a entrada na sala diretamente pelo fluxo de calibração e buffers
+            estadoResgate = RES_ENTRADA_SALA;
+            estadoAtual   = ESTADO_ZONA_RESGATE;
+            break; // Transiciona e quebra a execução do case ESTADO_LINHA imediatamente
+          }
+        }
+      }
+
+      // =====================================================================
       // MÁQUINA DE ESTADOS DO PID (O Seguidor de Linha em si)
       // =====================================================================
       
@@ -272,11 +307,12 @@ void loop() {
         Serial.print(F(" | Pretos: ")); Serial.println(sensoresNoPreto);
       }
 
-      switch (modoLinha) {
+switch (modoLinha) {
         case SEGUINDO:
-          if (!vendoLinha) { // O preto sumiu (Gap ou Quina)
-            modoLinha = INSISTINDO;
-            tempoInicioInsistir = millis();
+          if (!vendoLinha) { // O preto sumiu (Início do Gap ou Quina)
+            // Em vez de ir direto para INSISTINDO, inicia a ré de confirmação
+            modoLinha = CONFIRMANDO_VERMELHO;
+            tempoInicioConfirmarVermelho = millis();
           } else {
             contadorFalhas = 0; 
             int erro = 3500 - position;
@@ -291,6 +327,25 @@ void loop() {
             ultimoErro = erro;
 
             controlarRodas(VELOCIDADE_BASE + ajuste, VELOCIDADE_BASE - ajuste);
+          }
+          break;
+
+        case CONFIRMANDO_VERMELHO:
+          // Executa uma ré rápida por um tempo curtíssimo (120ms é o ideal para recuar ~1.5 cm)
+          if (millis() - tempoInicioConfirmarVermelho < 250) {
+            controlarRodas(70, 70); // Ré rápida e reta
+          } else {
+            controlarRodas(0, 0); // Para momentaneamente para estabilizar a leitura óptica
+            
+            // Realiza a leitura sob demanda com os sensores parados sobre a fita
+            if (verificarVermelhoSobDemanda()) {
+              pararMotores();
+              estadoAtual = ESTADO_VERMELHO;
+            } else {
+              // Não era vermelho (era apenas um GAP comum): segue a lógica nativa de busca de linha
+              modoLinha = INSISTINDO;
+              tempoInicioInsistir = millis();
+            }
           }
           break;
 
@@ -335,9 +390,9 @@ void loop() {
             modoLinha = SEGUINDO;
           }
           break;
-      }
+      } // Fecha o switch (modoLinha)
       break;
-    }
+    } // Fecha o case ESTADO_LINHA
 
     case ESTADO_VERDE: {
       // 1. Define o ângulo alvo com base no tipo de giro

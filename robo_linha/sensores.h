@@ -160,6 +160,32 @@ bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC
 }
 
 // ==============================================================================
+// CHECAGEM RÁPIDA SOB DEMANDA PARA FITA VERMELHA DE CHEGADA (NOVA FUNÇÃO)
+// ==============================================================================
+bool verificarVermelhoSobDemanda() {
+  uint16_t rD, gD, bD, cD;
+  uint16_t rE, gE, bE, cE;
+
+  // Seleciona o canal do sensor Direito no TCA e obtém os dados brutos
+  tcaselect(CANAL_TCS_DIR);
+  tcsDir.getRawData(&rD, &gD, &bD, &cD);
+
+  // Seleciona o canal do sensor Esquerdo no TCA e obtém os dados brutos
+  tcaselect(CANAL_TCS_ESQ);
+  tcsEsq.getRawData(&rE, &gE, &bE, &cE);
+
+  // Valida o vermelho reaproveitando a lógica e os limiares dinâmicos calibrados
+  bool vermelhoDir = ehVermelho(rD, gD, bD, cD, limiarLuminosidadeDir);
+  bool vermelhoEsq = ehVermelho(rE, gE, bE, cE, limiarLuminosidadeEsq);
+
+  if (vermelhoDir || vermelhoEsq) {
+    Serial.println(F("[SEGURANÇA] Vermelho confirmado no GAP! Parando o robô imediatamente."));
+    return true;
+  }
+  return false;
+}
+
+// ==============================================================================
 // CÁLCULO DE HUE (Matiz) — usado por ehVerde()
 // Converte RGB normalizado para ângulo de matiz [0°, 360°]
 // ==============================================================================
@@ -256,7 +282,7 @@ bool avaliarInterseccao() {
     }
     
     // Achou o verde! Dá mais um passinho para alinhar o eixo das rodas com o cruzamento
-    controlarRodas(100, 100); 
+    controlarRodas(90, 90); 
     delay(150); 
     pararMotores();
     delay(50); 

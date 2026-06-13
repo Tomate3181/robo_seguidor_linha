@@ -98,7 +98,7 @@ const uint8_t       TAM_FILTRO_SONAR           =    3;  // Número de amostras n
 // Considera saída confirmada quando ≥ SENSORES_SAIDA_MIN dos 4 sensores
 // centrais lerem acima de LIMIAR_IR_SAIDA por TEMPO_CONFIRMA_SAIDA_MS seguidos.
 const int           LIMIAR_IR_SAIDA            =  700;  // Valor QTR para considerar "linha preta"
-const uint8_t       SENSORES_SAIDA_MIN         =    3;  // Sensores centrais mínimos para confirmar saída
+const uint8_t       SENSORES_SAIDA_MIN         =    2;  // Sensores centrais mínimos para confirmar saída
 const unsigned long TEMPO_CONFIRMA_SAIDA_MS    =   80;  // Janela de debounce da detecção de saída (ms)
 
 // ==============================================================================

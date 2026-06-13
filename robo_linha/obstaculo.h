@@ -122,8 +122,8 @@ void iniciarDesvioObstaculo() {
     int distEsq = obterDistanciaFiltrada(sonarEsq);
     int distDir = obterDistanciaFiltrada(sonarDir);
 
-    // Escolhe o lado desimpedido
-    ladoDesvio = (distDir >= distEsq) ? 1 : -1;
+    // Força o desvio SEMPRE para a DIREITA
+    ladoDesvio = 1;
 
     Serial.print(F("[OBSTACULO] Lado escolhido: "));
     Serial.println(ladoDesvio == 1 ? F("DIREITA") : F("ESQUERDA"));

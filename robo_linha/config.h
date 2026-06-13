@@ -77,7 +77,7 @@ const float KI = 0.0;  // Constante Integral (Geralmente 0 para seguidor de linh
 const int VELOCIDADE_BASE = 120;
 const int VELOCIDADE_MAX = 255;
 const int VELOCIDADE_GAP = 130;
-const int TEMPO_PARA_12CM = 1200; // Tempo em ms para andar 12cm
+const int TEMPO_PARA_12CM = 1350; // Tempo em ms para andar 12cm
 
 // ==============================================================================
 // VELOCIDADES ESPECÍFICAS DA ZONA DE RESGATE
@@ -132,6 +132,7 @@ const int TOLERANCIA_CINZA = 60;
 // ==============================================================================
 enum ModoLinha {
   SEGUINDO,
+  CONFIRMANDO_VERMELHO, // Novo sub-estado de ré rápida
   INSISTINDO,
   GAP_AVANCA,
   GAP_RE_AJUSTE
@@ -140,5 +141,13 @@ enum ModoLinha {
 // ModoObstaculo removido: a lógica de desvio foi promovida a estados
 // independentes da FSM principal (ESTADO_OBSTACULO_RE, _GIRANDO, etc.)
 // Toda a implementação está encapsulada em obstaculo.h.
+
+// ==============================================================================
+// PARÂMETROS DO PORTAL DA ZONA DE RESGATE (SONAR LATERAL)
+// ==============================================================================
+// Se o robô ignorar o portal, aumente JANELA_POS_CRUZAMENTO ou LIMIAR_PAREDE_PORTAL.
+// Se ele disparar falsos positivos na pista aberta, diminua LIMIAR_PAREDE_PORTAL.
+const unsigned long JANELA_POS_CRUZAMENTO = 2500; // Tempo máximo (ms) pós-intersecção para aceitar entrada
+const int LIMIAR_PAREDE_PORTAL            = 20;   // Distância limite (cm) para considerar a parede do portal
 
 #endif // CONFIG_H
