@@ -154,7 +154,7 @@ bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC
 
   // R deve dominar com boa margem sobre G e B
   // Threshold 1.8x (conservador vs 2.72x medido) → cobre variações de iluminação
-  if (r > (g * 1.8f) && r > (b * 2.0f)) return true;
+  if (r > (g * 1.6f) && r > (b * 1.8f)) return true;
 
   return false;
 }
@@ -213,8 +213,8 @@ bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC) {
   // REGRA PRIMÁRIA: G deve dominar com margem clara sobre R e B
   // Threshold 1.8x (conservador vs 2.25x mínimo medido)
   // Isso rejeita cinza (G/R~1.23) e branco (G/R~1.27) automaticamente
-  if (g <= (r * 1.8f)) return false;
-  if (g <= (b * 1.8f)) return false;
+  if (g <= (r * 1.6f)) return false;
+  if (g <= (b * 1.6f)) return false;
 
   // Confirmação por Hue: verde real fica entre 95° e 155°
   float hue = calcularHue((float)r, (float)g, (float)b);
