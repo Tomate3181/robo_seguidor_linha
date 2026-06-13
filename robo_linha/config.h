@@ -80,6 +80,16 @@ const int VELOCIDADE_GAP = 130;
 const int TEMPO_PARA_12CM = 1200; // Tempo em ms para andar 12cm
 
 // ==============================================================================
+// VELOCIDADES ESPECÍFICAS DA ZONA DE RESGATE
+// Valores reduzidos em relação à pista para maximizar precisão:
+//   - Leituras ultrassônicas não sofrem efeito Doppler
+//   - MPU6050 acumula menos erro de integração nos giros
+//   - Maior tempo de reação antes de colidir com paredes
+// ==============================================================================
+const int VELOCIDADE_RESGATE_RETO = 95;  // PWM de avanço em linha reta (corrigido pelo Yaw)
+const int VELOCIDADE_RESGATE_GIRO = 85;  // PWM base dos giros de 90° dentro do resgate
+
+// ==============================================================================
 // CALIBRAÇÃO DE LUMINOSIDADE DA SILVER TAPE (Sensores RGB TCS34725)
 // ==============================================================================
 // Configuração de hardware: GAIN_4X, INTEGRATIONTIME_24MS, sensor a ~3mm do chão.

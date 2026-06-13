@@ -154,7 +154,7 @@ bool ehVermelho(uint16_t r, uint16_t g, uint16_t b, uint16_t c, uint16_t limiarC
 
   // R deve dominar com boa margem sobre G e B
   // Threshold 1.8x (conservador vs 2.72x medido) → cobre variações de iluminação
-  if (r > (g * 1.6f) && r > (b * 1.8f)) return true;
+  if (r > (g * 1.6f) && r > (b * 1.6f)) return true;
 
   return false;
 }

@@ -71,14 +71,35 @@ const unsigned long TEMPO_FILTRO_CRUZ_MS       = 200;  // Duração do avanço (
 const int           LIMIAR_IR_CRUZ             = 700;  // Valor mínimo para considerar "linha preta"
 const int           SENSORES_CENTRAIS_CRUZ     = 2;    // Qtd. mínima de sensores centrais vendo preto
 
-// --- Navegação na Sala de Resgate (Ultrassom) ---
-const float         DIST_PAREDE_FRENTE_CM      = 15.0; // Distância de frenagem/parada frontal (cm)
-const float         DIST_PAREDE_LATERAL_CM     = 18.0; // Distância alvo de seguimento lateral (cm)
-const float         DIST_LATERAL_TOLERANCIA_RES = 4.0; // Banda morta lateral (cm)
-const int           VEL_RESGATE_BASE           = 100;  // Velocidade base dentro da sala
-const int           VEL_RESGATE_GIRO           = 90;   // Velocidade do giro de 90° no resgate
-const unsigned long TIMEOUT_GIRO_RESGATE_MS    = 3000; // Timeout de segurança do giro (ms)
-const unsigned long TIMEOUT_SONAR_RESGATE_MS   = 60;   // Intervalo entre leituras do sonar (ms)
+// --- Navegação na Sala de Resgate (Ultrassom + Giroscópio) ---
+// Velocidades: usa as constantes de config.h (VELOCIDADE_RESGATE_RETO / _GIRO)
+// para garantir precisão. Ver config.h para justificativa dos valores.
+
+const float         DIST_PAREDE_FRENTE_CM       = 12.0; // Distância de frenagem/parada frontal (cm)
+const float         DIST_PAREDE_LATERAL_CM      = 18.0; // Distância alvo de centralização lateral (cm)
+const float         DIST_LATERAL_TOLERANCIA_RES =  4.0; // Banda morta lateral (cm) — evita correção contínua
+const unsigned long TIMEOUT_GIRO_RESGATE_MS     = 3500; // Timeout de segurança do giro (ms)
+const unsigned long TIMEOUT_SONAR_RESGATE_MS    =  55;  // Intervalo entre ciclos de leitura sonar (~18 Hz)
+
+// --- Alinhamento em linha reta com o giroscópio (malha fechada de Yaw) ---
+// Enquanto avança, o robô monitora o desvio angular em relação ao Yaw de referência.
+// A correção é proporcional ao erro de ângulo — análogo ao PID de linha.
+const float         KP_YAW_RESGATE             =  2.5f; // Ganho proporcional do controlador de Yaw
+const float         TOLERANCIA_YAW_RESGATE     =  1.5f; // Erro angular (graus) tolerado sem correção
+const int           CORRECAO_YAW_MAX           =   25;  // Correção máxima em PWM (evita oscilação)
+
+// --- Filtro de média móvel para os ultrassônicos (anti-ruído de eco) ---
+// Cada leitura de sonar é armazenada em um buffer circular de N amostras.
+// A distância usada é a mediana das N amostras — imune a spikes isolados.
+const uint8_t       TAM_FILTRO_SONAR           =    3;  // Número de amostras no buffer (3 leituras)
+
+// --- Detecção da saída da zona de resgate (portal = linha preta no IR) ---
+// O robô varre continuamente a barra QTR durante a navegação.
+// Considera saída confirmada quando ≥ SENSORES_SAIDA_MIN dos 4 sensores
+// centrais lerem acima de LIMIAR_IR_SAIDA por TEMPO_CONFIRMA_SAIDA_MS seguidos.
+const int           LIMIAR_IR_SAIDA            =  700;  // Valor QTR para considerar "linha preta"
+const uint8_t       SENSORES_SAIDA_MIN         =    3;  // Sensores centrais mínimos para confirmar saída
+const unsigned long TEMPO_CONFIRMA_SAIDA_MS    =   80;  // Janela de debounce da detecção de saída (ms)
 
 // ==============================================================================
 // ENUMERAÇÃO DA FSM INTERNA DO RESGATE
@@ -86,7 +107,8 @@ const unsigned long TIMEOUT_SONAR_RESGATE_MS   = 60;   // Intervalo entre leitur
 enum EstadoResgate {
   RES_AGUARDANDO_INICIO,    // Estado neutro / aguardando entrada na zona
   RES_FILTRO_CRUZ,          // Avanço pós-silver para detectar cruzamento em +
-  RES_NAVEGANDO,            // Navegação autônoma por ultrassom
+  RES_ENTRADA_SALA,         // Captura Yaw de referência e inicializa buffers (executa 1x)
+  RES_NAVEGANDO,            // Navegação autônoma: linha reta (Yaw) + sonar filtrado
   RES_GIRANDO_DIREITA,      // Giro de 90° para a direita (parede frontal)
   RES_GIRANDO_ESQUERDA,     // Giro de 90° para a esquerda (parede frontal)
   RES_CONCLUIDO             // Resgate encerrado (reservado para expansão futura)
@@ -177,7 +199,19 @@ static unsigned long tempoInicioCruz       = 0;
 static unsigned long tempoUltimoSonarRes   = 0;
 static unsigned long tempoInicioGiroRes    = 0;
 static float         anguloBaseGiroRes     = 0.0;
-static int           ladoGiroRes           = 1; // +1 = direita, -1 = esquerda
+static float         anguloReferenciaReto  = 0.0; // Yaw salvo ao entrar na sala / após cada giro
+static int           ladoGiroRes           = 1;   // +1 = direita, -1 = esquerda
+
+// Buffers circulares para filtro de média móvel dos três sonares
+static int  bufFrente[TAM_FILTRO_SONAR];
+static int  bufEsq[TAM_FILTRO_SONAR];
+static int  bufDir[TAM_FILTRO_SONAR];
+static uint8_t idxBufSonar = 0;
+static bool  bufInicializado = false;
+
+// Detecção da saída (portal de linha preta)
+static unsigned long tempoDetectouSaida    = 0;  // Momento da primeira detecção estável
+static bool          saidaEmDebounce       = false; // Flag de janela de confirmação
 
 // ==============================================================================
 // FUNÇÕES AUXILIARES INTERNAS
@@ -556,13 +590,157 @@ inline void executarValidacaoSilverTape() {
 }
 
 // ==============================================================================
+// FUNÇÕES AUXILIARES — ZONA DE RESGATE
+// ==============================================================================
+
+/*
+ * inicializarBuffersSonar()
+ * Preenche todos os buffers circulares com a distância máxima para garantir
+ * que o filtro não produza leituras falsas no primeiro ciclo dentro da sala.
+ */
+static void inicializarBuffersSonar() {
+  for (uint8_t i = 0; i < TAM_FILTRO_SONAR; i++) {
+    bufFrente[i] = MAX_DISTANCE;
+    bufEsq[i]    = MAX_DISTANCE;
+    bufDir[i]    = MAX_DISTANCE;
+  }
+  idxBufSonar    = 0;
+  bufInicializado = true;
+}
+
+/*
+ * lerSonarFiltrado()
+ * Lê os três sonares, atualiza o buffer circular e retorna a mediana
+ * (valor do meio após ordenação dos 3 elementos).
+ *
+ * POR QUE MEDIANA E NÃO MÉDIA?
+ *   Um único eco falso (ex: 0 cm ou 60 cm) não contamina a mediana.
+ *   A média seria puxada pelo outlier; a mediana descarta o extremo.
+ *   Com N=3: ordena e retorna o elemento central.
+ *
+ * Preenche as variáveis passadas por referência com os valores filtrados.
+ */
+static void lerSonarFiltrado(int &outFrente, int &outEsq, int &outDir) {
+  // Lê uma nova amostra de cada sensor e armazena no slot atual do buffer
+  bufFrente[idxBufSonar] = obterDistanciaFiltrada(sonarFrente);
+  bufEsq   [idxBufSonar] = obterDistanciaFiltrada(sonarEsq);
+  bufDir   [idxBufSonar] = obterDistanciaFiltrada(sonarDir);
+  idxBufSonar = (idxBufSonar + 1) % TAM_FILTRO_SONAR; // Avança índice circular
+
+  // --- Mediana de 3 elementos (ordenação em rede — 3 comparações, sem laço) ---
+  // Copia os buffers para variáveis temporárias antes de ordenar
+  int f[3] = { bufFrente[0], bufFrente[1], bufFrente[2] };
+  int e[3] = { bufEsq[0],    bufEsq[1],    bufEsq[2]    };
+  int d[3] = { bufDir[0],    bufDir[1],    bufDir[2]     };
+
+  // Rede de ordenação ótima para N=3 (Batcher's odd-even merge)
+  #define SWAP_IF_MAIOR(a, b) if ((a) > (b)) { int t = (a); (a) = (b); (b) = t; }
+  SWAP_IF_MAIOR(f[0], f[1]); SWAP_IF_MAIOR(f[1], f[2]); SWAP_IF_MAIOR(f[0], f[1]);
+  SWAP_IF_MAIOR(e[0], e[1]); SWAP_IF_MAIOR(e[1], e[2]); SWAP_IF_MAIOR(e[0], e[1]);
+  SWAP_IF_MAIOR(d[0], d[1]); SWAP_IF_MAIOR(d[1], d[2]); SWAP_IF_MAIOR(d[0], d[1]);
+  #undef SWAP_IF_MAIOR
+
+  outFrente = f[1]; // Elemento central = mediana
+  outEsq    = e[1];
+  outDir    = d[1];
+}
+
+/*
+ * verificarSaidaResgate()
+ * Verifica continuamente se a barra IR detectou a linha preta do portal de saída.
+ *
+ * LÓGICA DE DEBOUNCE:
+ *   Ao detectar ≥ SENSORES_SAIDA_MIN sensores centrais acima de LIMIAR_IR_SAIDA,
+ *   inicia uma janela de confirmação de TEMPO_CONFIRMA_SAIDA_MS ms.
+ *   Se após esse tempo o IR ainda confirmar a linha, a saída é aceita.
+ *   Se o IR oscilar durante a janela, o debounce é resetado (ignora ruído).
+ *
+ * POR QUE USAR OS CENTRAIS (índices 2–5)?
+ *   Os sensores das bordas (0, 1, 6, 7) podem ver reflexos laterais das
+ *   paredes brancas do corredor de resgate. Os centrais são mais confiáveis
+ *   para detectar a linha preta que cruza o corredor na direção de saída.
+ *
+ * Retorna true se a saída foi confirmada com debounce.
+ */
+static bool verificarSaidaResgate() {
+  qtr.readLineBlack(sensorValues);
+
+  // Conta sensores centrais (2, 3, 4, 5) com leitura de linha preta
+  uint8_t contagem = 0;
+  for (uint8_t i = 2; i <= 5; i++) {
+    if (sensorValues[i] >= LIMIAR_IR_SAIDA) contagem++;
+  }
+
+  bool linhaPresenteAgora = (contagem >= SENSORES_SAIDA_MIN);
+
+  if (linhaPresenteAgora) {
+    if (!saidaEmDebounce) {
+      // Primeira detecção — inicia janela de confirmação
+      saidaEmDebounce    = true;
+      tempoDetectouSaida = millis();
+      return false; // Ainda não confirmado
+    }
+    // Linha persistiu: verifica se a janela de debounce expirou
+    if (millis() - tempoDetectouSaida >= TEMPO_CONFIRMA_SAIDA_MS) {
+      return true; // SAÍDA CONFIRMADA
+    }
+  } else {
+    // Linha sumiu antes do debounce — reseta (era ruído ou reflexo)
+    saidaEmDebounce = false;
+  }
+
+  return false;
+}
+
+/*
+ * resetarEstadoNavegacaoResgate()
+ * Limpa todas as variáveis de tempo e estado da navegação interna do resgate.
+ * Chamada tanto na transição de saída quanto em reinícios de segurança.
+ */
+static void resetarEstadoNavegacaoResgate() {
+  estadoResgate       = RES_AGUARDANDO_INICIO;
+  tempoUltimoSonarRes = 0;
+  tempoInicioGiroRes  = 0;
+  anguloBaseGiroRes   = 0.0;
+  anguloReferenciaReto = 0.0;
+  ladoGiroRes         = 1;
+  saidaEmDebounce     = false;
+  tempoDetectouSaida  = 0;
+  bufInicializado     = false;
+}
+
+// ==============================================================================
 // FUNÇÕES PÚBLICAS — ZONA DE RESGATE
 // ==============================================================================
 
 /*
  * executarRotinaResgate()
  * Chamada a cada ciclo do loop() enquanto o robô está em ESTADO_ZONA_RESGATE.
- * Contém a FSM interna do resgate com os sub-estados do enum EstadoResgate.
+ *
+ * ARQUITETURA DA FSM INTERNA:
+ *
+ *   RES_FILTRO_CRUZ
+ *     └─► (branco total após avanço)  ──► RES_ENTRADA_SALA
+ *     └─► (linha preta nos centrais)  ──► ESTADO_LINHA (falso positivo)
+ *
+ *   RES_ENTRADA_SALA  (NOVO)
+ *     └─► Salva Yaw de referência ("linha reta" = 0°) e inicializa buffers
+ *     └─► Transita imediatamente para RES_NAVEGANDO
+ *
+ *   RES_NAVEGANDO
+ *     ├─► Avança em linha reta com correção proporcional do Yaw (malha fechada)
+ *     ├─► Varre IR continuamente → linha preta central = SAÍDA confirmada
+ *     ├─► Sonar filtrado por mediana (buffer N=3) a cada TIMEOUT_SONAR_RESGATE_MS
+ *     └─► Parede frontal ≤ DIST_PAREDE_FRENTE_CM → RES_GIRANDO_DIREITA ou _ESQUERDA
+ *
+ *   RES_GIRANDO_DIREITA / RES_GIRANDO_ESQUERDA
+ *     ├─► Giro de 90° validado pelo Yaw do MPU6050 (proporcional ao erro)
+ *     ├─► Varre IR durante o giro → saída confirmada mesmo girando
+ *     └─► Ao concluir: salva novo Yaw de referência → RES_NAVEGANDO
+ *
+ * SAÍDA DA ZONA:
+ *   Qualquer sub-estado pode chamar verificarSaidaResgate().
+ *   Ao confirmar: limpa variáveis, muda estadoAtual → ESTADO_LINHA.
  */
 inline void executarRotinaResgate() {
 
@@ -577,8 +755,8 @@ inline void executarRotinaResgate() {
       static bool filtroIniciado = false;
 
       if (!filtroIniciado) {
-        tempoInicioCruz  = millis();
-        filtroIniciado   = true;
+        tempoInicioCruz = millis();
+        filtroIniciado  = true;
         Serial.println(F("[RESGATE] Filtro de cruzamento em cruz: avancando..."));
       }
 
@@ -586,15 +764,14 @@ inline void executarRotinaResgate() {
       if (millis() - tempoInicioCruz < TEMPO_FILTRO_CRUZ_MS) {
         controlarRodas(VELOCIDADE_FILTRO_CRUZ, VELOCIDADE_FILTRO_CRUZ);
 
-        // Durante o avanço, monitora os sensores centrais
+        // Monitora os sensores centrais durante o avanço
         qtr.readLineBlack(sensorValues);
         if (contarSensoresCentraisPretos() >= SENSORES_CENTRAIS_CRUZ) {
-          // Linha preta nos centrais: é um cruzamento em +, não é o resgate!
+          // Linha preta nos centrais: é um cruzamento em +, não é a sala de resgate
           pararMotores();
           filtroIniciado = false;
-          estadoResgate  = RES_AGUARDANDO_INICIO; // Reseta a FSM interna
+          estadoResgate  = RES_AGUARDANDO_INICIO;
 
-          // Zera variáveis do PID para retomada limpa
           ultimoErro     = 0;
           contadorFalhas = 0;
           modoLinha      = SEGUINDO;
@@ -609,7 +786,6 @@ inline void executarRotinaResgate() {
         pararMotores();
         qtr.readLineBlack(sensorValues);
 
-        // Verifica se os sensores centrais estão vendo branco (linha sumiu = resgate real)
         bool brancoTotal = true;
         for (uint8_t i = 2; i <= 5; i++) {
           if (sensorValues[i] >= LIMIAR_IR_CRUZ) {
@@ -618,154 +794,296 @@ inline void executarRotinaResgate() {
           }
         }
 
-        filtroIniciado = false; // Reseta a flag para próxima entrada
+        filtroIniciado = false;
 
         if (brancoTotal) {
-          // Branco total nos centrais: resgate CONFIRMADO!
-          Serial.println(F("[RESGATE] Branco total confirmado. Resgate validado! Iniciando navegacao."));
-          tempoUltimoSonarRes = millis();
-          estadoResgate = RES_NAVEGANDO;
+          // Branco total: resgate confirmado → vai para a entrada
+          Serial.println(F("[RESGATE] Branco total confirmado. Sala de resgate validada! Preparando entrada..."));
+          estadoResgate = RES_ENTRADA_SALA;
         } else {
-          // Ainda tem linha: cruzamento em cruz tardio ou ruído
+          // Ainda tem linha: cruzamento tardio ou ruído
           ultimoErro     = 0;
           contadorFalhas = 0;
           modoLinha      = SEGUINDO;
           estadoResgate  = RES_AGUARDANDO_INICIO;
           estadoAtual    = ESTADO_LINHA;
-          Serial.println(F("[RESGATE] Linha ainda presente apos filtro. Abortando. Voltando para linha."));
+          Serial.println(F("[RESGATE] Linha presente apos filtro. Abortando. Voltando para linha."));
         }
       }
+      break;
+    }
+
+    // --------------------------------------------------------------------------
+    // SUB-ESTADO: RES_ENTRADA_SALA  (novo)
+    // Executa UMA VEZ ao entrar na sala:
+    //   1. Salva o Yaw atual como referência de "linha reta" (0° relativo)
+    //   2. Inicializa os buffers de filtro dos sonares
+    //   3. Reseta variáveis de debounce da saída
+    //   4. Transita imediatamente para RES_NAVEGANDO
+    //
+    // Este estado isolado garante que a referência angular seja sempre
+    // capturada com o robô parado e estável, nunca no meio de um movimento.
+    // --------------------------------------------------------------------------
+    case RES_ENTRADA_SALA: {
+      pararMotores();
+
+      // Captura o Yaw atual como referência de "andar reto" na sala
+      tcaselect(CANAL_GY521);
+      mpu.update();
+      anguloReferenciaReto = mpu.getAngleZ();
+      anguloBaseGiroRes    = anguloReferenciaReto;
+
+      // Inicializa os buffers circulares do filtro de sonar
+      inicializarBuffersSonar();
+
+      // Reseta o debounce da saída
+      saidaEmDebounce    = false;
+      tempoDetectouSaida = 0;
+
+      tempoUltimoSonarRes = millis();
+
+      Serial.print(F("[RESGATE] Entrada na sala. Yaw de referencia: "));
+      Serial.print(anguloReferenciaReto);
+      Serial.println(F(" graus. Iniciando navegacao..."));
+
+      estadoResgate = RES_NAVEGANDO;
       break;
     }
 
     // --------------------------------------------------------------------------
     // SUB-ESTADO: RES_NAVEGANDO
-    // Navegação por malha fechada usando os três ultrassônicos.
-    // Estratégia: avança enquanto há espaço frontal; ao encontrar parede,
-    // gira para o lado com mais espaço.
+    // Navegação autônoma dentro da sala de resgate usando:
+    //   • Malha fechada de Yaw (giroscópio) para manter linha reta
+    //   • Três ultrassônicos filtrados por mediana para mapeamento de paredes
+    //   • Varredura contínua da barra IR para detectar a saída
+    //
+    // ESTRATÉGIA DE NAVEGAÇÃO POR PAREDE (wall-following simplificado):
+    //   O robô avança em linha reta corrigida pelo Yaw. Ao detectar parede
+    //   frontal, para e gira 90° para o lado com mais espaço lateral.
+    //   Não há seguimento de parede lateral — o Yaw mantém a reta após cada giro.
+    //   Isso é suficiente para labirintos ortogonais (ladrilhos 30×30 cm).
     // --------------------------------------------------------------------------
     case RES_NAVEGANDO: {
-      // Throttle de leitura do sonar para não ultrapassar ~20 Hz do HC-SR04
-      if (millis() - tempoUltimoSonarRes > TIMEOUT_SONAR_RESGATE_MS) {
-        tempoUltimoSonarRes = millis();
 
-        // Lê os três ultrassônicos
-        int distFrente = obterDistanciaFiltrada(sonarFrente);
-        int distEsq    = obterDistanciaFiltrada(sonarEsq);
-        int distDir    = obterDistanciaFiltrada(sonarDir);
+      // -----------------------------------------------------------------------
+      // PASSO 1: Varredura contínua da saída (prioridade máxima — verifica ANTES
+      //          de qualquer decisão de movimentação)
+      // -----------------------------------------------------------------------
+      if (verificarSaidaResgate()) {
+        pararMotores();
 
-        Serial.print(F("[RESGATE-NAV] F:")); Serial.print(distFrente);
-        Serial.print(F(" E:"));              Serial.print(distEsq);
-        Serial.print(F(" D:"));              Serial.println(distDir);
+        // Limpa todo o estado interno da navegação do resgate
+        resetarEstadoNavegacaoResgate();
 
-        // --- Decisão primária: parede frontal? ---
-        if (distFrente <= DIST_PAREDE_FRENTE_CM) {
-          // Parede à frente: para e escolhe o lado com mais espaço para girar
-          controlarRodas(0, 0);
+        // Limpa variáveis do PID para retomada limpa pelo ESTADO_LINHA
+        ultimoErro     = 0;
+        contadorFalhas = 0;
+        modoLinha      = SEGUINDO;
 
-          // Captura o Yaw atual como base para o giro de 90°
-          tcaselect(CANAL_GY521);
-          mpu.update();
-          anguloBaseGiroRes = mpu.getAngleZ();
-
-          if (distDir >= distEsq) {
-            // Mais espaço à direita: gira para a direita
-            ladoGiroRes   = 1;
-            estadoResgate = RES_GIRANDO_DIREITA;
-            Serial.println(F("[RESGATE-NAV] Parede frontal! Girando 90 graus para DIREITA."));
-          } else {
-            // Mais espaço à esquerda: gira para a esquerda
-            ladoGiroRes   = -1;
-            estadoResgate = RES_GIRANDO_ESQUERDA;
-            Serial.println(F("[RESGATE-NAV] Parede frontal! Girando 90 graus para ESQUERDA."));
-          }
-          tempoInicioGiroRes = millis();
-          return;
-        }
-
-        // --- Decisão secundária: correção lateral suave (seguimento de parede) ---
-        // Mantém o robô centralizado no corredor usando feedback dos sonares laterais
-        float erroLateral = distDir - distEsq; // Positivo = mais longe da direita → deriva para esq
-        int ajusteLateral = (int)(erroLateral * 1.5); // Ganho proporcional simples
-        ajusteLateral     = constrain(ajusteLateral, -30, 30);
-
-        // Avança com correção lateral
-        controlarRodas(VEL_RESGATE_BASE + ajusteLateral, VEL_RESGATE_BASE - ajusteLateral);
+        estadoAtual = ESTADO_LINHA;
+        Serial.println(F("[RESGATE] SAIDA DETECTADA! Portal encontrado. Retornando ao PID."));
+        return;
       }
+
+      // -----------------------------------------------------------------------
+      // PASSO 2: Throttle do sonar — executa o ciclo de navegação em ~18 Hz
+      // -----------------------------------------------------------------------
+      if (millis() - tempoUltimoSonarRes <= TIMEOUT_SONAR_RESGATE_MS) break;
+      tempoUltimoSonarRes = millis();
+
+      // -----------------------------------------------------------------------
+      // PASSO 3: Leitura dos três sonares com filtro de mediana
+      // -----------------------------------------------------------------------
+      int distFrente, distEsq, distDir;
+      lerSonarFiltrado(distFrente, distEsq, distDir);
+
+      Serial.print(F("[RESGATE-NAV] F:")); Serial.print(distFrente);
+      Serial.print(F(" E:"));              Serial.print(distEsq);
+      Serial.print(F(" D:"));              Serial.println(distDir);
+
+      // -----------------------------------------------------------------------
+      // PASSO 4: Decisão — parede frontal?
+      // -----------------------------------------------------------------------
+      if (distFrente <= (int)DIST_PAREDE_FRENTE_CM) {
+        // Para o robô e escolhe o lado com mais espaço livre
+        controlarRodas(0, 0);
+
+        // Captura Yaw para o giro de 90°
+        tcaselect(CANAL_GY521);
+        mpu.update();
+        anguloBaseGiroRes = mpu.getAngleZ();
+
+        if (distDir >= distEsq) {
+          ladoGiroRes   =  1;
+          estadoResgate = RES_GIRANDO_DIREITA;
+          Serial.println(F("[RESGATE-NAV] Parede frontal! Girando 90 graus para DIREITA."));
+        } else {
+          ladoGiroRes   = -1;
+          estadoResgate = RES_GIRANDO_ESQUERDA;
+          Serial.println(F("[RESGATE-NAV] Parede frontal! Girando 90 graus para ESQUERDA."));
+        }
+        tempoInicioGiroRes = millis();
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // PASSO 5: Avanço em linha reta com correção de Yaw (malha fechada)
+      //
+      // CONTROLE PROPORCIONAL DO YAW:
+      //   Erro = anguloReferenciaReto - yawAtual
+      //   Positivo → robô deriva para a esquerda → aumenta velocidade da esquerda
+      //   Negativo → robô deriva para a direita  → aumenta velocidade da direita
+      //
+      //   Correção = KP_YAW_RESGATE × erro, limitada a ±CORRECAO_YAW_MAX PWM
+      //
+      // Esta abordagem compensa assimetrias mecânicas (rodas com diâmetros
+      // ligeiramente diferentes, atrito diferencial, etc.) de forma contínua
+      // sem acumular erro ao longo do percurso nos ladrilhos brancos.
+      // -----------------------------------------------------------------------
+      tcaselect(CANAL_GY521);
+      mpu.update();
+      float yawAtual  = mpu.getAngleZ();
+      float erroYaw   = anguloReferenciaReto - yawAtual;
+
+      // Só corrige se o desvio ultrapassar a tolerância (evita micro-oscilações)
+      int correcao = 0;
+      if (abs(erroYaw) > TOLERANCIA_YAW_RESGATE) {
+        correcao = constrain((int)(KP_YAW_RESGATE * erroYaw), -CORRECAO_YAW_MAX, CORRECAO_YAW_MAX);
+      }
+
+      // Aplica a velocidade de resgate com a correção diferencial
+      // Lado esquerdo: +correcao aumenta quando deriva para esq (erro > 0)
+      // Lado direito:  -correcao diminui quando deriva para esq (freia lado externo)
+      controlarRodas(
+        VELOCIDADE_RESGATE_RETO - correcao,  // Direita
+        VELOCIDADE_RESGATE_RETO + correcao   // Esquerda
+      );
       break;
     }
 
     // --------------------------------------------------------------------------
     // SUB-ESTADO: RES_GIRANDO_DIREITA
-    // Gira 90° para a direita usando o Yaw do MPU6050 como referência.
+    // Gira 90° para a direita usando o Yaw do MPU6050 como referência absoluta.
     // Convenção do MPU neste projeto: giro à DIREITA → Yaw DIMINUI (negativo).
+    //
+    // Após o giro: salva novo Yaw como referência de linha reta para o próximo
+    // corredor — essencial para que a malha de Yaw funcione corretamente.
     // --------------------------------------------------------------------------
     case RES_GIRANDO_DIREITA: {
+
+      // Varredura contínua da saída mesmo durante o giro
+      if (verificarSaidaResgate()) {
+        pararMotores();
+        resetarEstadoNavegacaoResgate();
+        ultimoErro     = 0;
+        contadorFalhas = 0;
+        modoLinha      = SEGUINDO;
+        estadoAtual    = ESTADO_LINHA;
+        Serial.println(F("[RESGATE] SAIDA detectada durante giro! Retornando ao PID."));
+        return;
+      }
+
       tcaselect(CANAL_GY521);
       mpu.update();
-      float yawAtual  = mpu.getAngleZ();
-      float anguloAlvo = anguloBaseGiroRes - 90.0; // Giro à direita: subtrai 90°
-      float erro      = anguloAlvo - yawAtual;
+      float yawAtual   = mpu.getAngleZ();
+      float anguloAlvo = anguloBaseGiroRes - 90.0; // Direita → subtrai 90°
+      float erro       = anguloAlvo - yawAtual;
 
       if (abs(erro) > 3.0) {
-        // Proporcional ao erro, limitado para não gerar inércia excessiva
-        int velGiro = constrain(80 + (int)(abs(erro) * 1.5), 80, 160);
-        // Girar à DIREITA: roda esquerda para frente, direita para trás
+        // Velocidade proporcional ao erro: mais rápido longe do alvo, freia ao chegar
+        int velGiro = constrain(
+          VELOCIDADE_RESGATE_GIRO + (int)(abs(erro) * 1.2f),
+          VELOCIDADE_RESGATE_GIRO,
+          VELOCIDADE_RESGATE_GIRO + 50
+        );
+        // Girar à DIREITA: esquerda para frente, direita para trás
         controlarRodas(-velGiro, velGiro);
 
-        // Timeout de segurança
+        // Timeout de segurança contra travamento mecânico
         if (millis() - tempoInicioGiroRes > TIMEOUT_GIRO_RESGATE_MS) {
-          Serial.println(F("[RESGATE-GIRO] TIMEOUT no giro direita! Retomando navegacao."));
+          Serial.println(F("[RESGATE-GIRO] TIMEOUT no giro direita! Forcando retomada."));
           controlarRodas(0, 0);
-          tempoUltimoSonarRes = millis();
-          estadoResgate = RES_NAVEGANDO;
+          // Atualiza referência com o ângulo real atingido (mesmo incompleto)
+          anguloReferenciaReto = mpu.getAngleZ();
+          tempoUltimoSonarRes  = millis();
+          estadoResgate        = RES_NAVEGANDO;
         }
       } else {
-        // Giro concluído
+        // Giro concluído com precisão
         controlarRodas(0, 0);
-        Serial.println(F("[RESGATE-GIRO] Giro 90 graus DIREITA concluido."));
+
+        // CRÍTICO: salva o Yaw atual como nova referência de "linha reta"
+        // para o corredor perpendicular que o robô vai percorrer a seguir
+        anguloReferenciaReto = mpu.getAngleZ();
+
+        Serial.print(F("[RESGATE-GIRO] Giro 90 DIREITA concluido. Nova ref. Yaw: "));
+        Serial.println(anguloReferenciaReto);
+
         tempoUltimoSonarRes = millis();
-        estadoResgate = RES_NAVEGANDO;
+        estadoResgate       = RES_NAVEGANDO;
       }
       break;
     }
 
     // --------------------------------------------------------------------------
     // SUB-ESTADO: RES_GIRANDO_ESQUERDA
-    // Gira 90° para a esquerda usando o Yaw do MPU6050 como referência.
+    // Gira 90° para a esquerda usando o Yaw do MPU6050 como referência absoluta.
     // Convenção do MPU neste projeto: giro à ESQUERDA → Yaw AUMENTA (positivo).
     // --------------------------------------------------------------------------
     case RES_GIRANDO_ESQUERDA: {
+
+      // Varredura contínua da saída mesmo durante o giro
+      if (verificarSaidaResgate()) {
+        pararMotores();
+        resetarEstadoNavegacaoResgate();
+        ultimoErro     = 0;
+        contadorFalhas = 0;
+        modoLinha      = SEGUINDO;
+        estadoAtual    = ESTADO_LINHA;
+        Serial.println(F("[RESGATE] SAIDA detectada durante giro! Retornando ao PID."));
+        return;
+      }
+
       tcaselect(CANAL_GY521);
       mpu.update();
       float yawAtual   = mpu.getAngleZ();
-      float anguloAlvo = anguloBaseGiroRes + 90.0; // Giro à esquerda: soma 90°
+      float anguloAlvo = anguloBaseGiroRes + 90.0; // Esquerda → soma 90°
       float erro       = anguloAlvo - yawAtual;
 
       if (abs(erro) > 3.0) {
-        int velGiro = constrain(80 + (int)(abs(erro) * 1.5), 80, 160);
-        // Girar à ESQUERDA: roda direita para frente, esquerda para trás
+        int velGiro = constrain(
+          VELOCIDADE_RESGATE_GIRO + (int)(abs(erro) * 1.2f),
+          VELOCIDADE_RESGATE_GIRO,
+          VELOCIDADE_RESGATE_GIRO + 50
+        );
+        // Girar à ESQUERDA: direita para frente, esquerda para trás
         controlarRodas(velGiro, -velGiro);
 
         if (millis() - tempoInicioGiroRes > TIMEOUT_GIRO_RESGATE_MS) {
-          Serial.println(F("[RESGATE-GIRO] TIMEOUT no giro esquerda! Retomando navegacao."));
+          Serial.println(F("[RESGATE-GIRO] TIMEOUT no giro esquerda! Forcando retomada."));
           controlarRodas(0, 0);
-          tempoUltimoSonarRes = millis();
-          estadoResgate = RES_NAVEGANDO;
+          anguloReferenciaReto = mpu.getAngleZ();
+          tempoUltimoSonarRes  = millis();
+          estadoResgate        = RES_NAVEGANDO;
         }
       } else {
         controlarRodas(0, 0);
-        Serial.println(F("[RESGATE-GIRO] Giro 90 graus ESQUERDA concluido."));
+
+        // Salva nova referência de linha reta após o giro
+        anguloReferenciaReto = mpu.getAngleZ();
+
+        Serial.print(F("[RESGATE-GIRO] Giro 90 ESQUERDA concluido. Nova ref. Yaw: "));
+        Serial.println(anguloReferenciaReto);
+
         tempoUltimoSonarRes = millis();
-        estadoResgate = RES_NAVEGANDO;
+        estadoResgate       = RES_NAVEGANDO;
       }
       break;
     }
 
     // --------------------------------------------------------------------------
     // SUB-ESTADO: RES_CONCLUIDO
-    // Reservado para expansão futura (depositar vítimas, sair da sala, etc.)
-    // Por ora, para o robô e aguarda.
+    // Reservado para expansão futura (depositar vítimas, aguardar sinal, etc.)
     // --------------------------------------------------------------------------
     case RES_CONCLUIDO:
       controlarRodas(0, 0);
